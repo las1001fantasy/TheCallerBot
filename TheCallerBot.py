@@ -77,7 +77,7 @@ def init_db():
 def get_fleaflicker_teams_info(league_id: str):
     """
     Obtiene todos los equipos de la liga desde Fleaflicker junto con 
-    todos sus posibles identificadores (ID de equipo, ID de usuario, DisplayName, Username).
+    sus IDs de equipo y datos de propietarios.
     """
     teams_info = []
     url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
@@ -88,14 +88,14 @@ def get_fleaflicker_teams_info(league_id: str):
             data = res.json()
             for roster in data.get("rosters", []):
                 team = roster.get("team", {})
+                team_id = str(team.get("id")).strip() if team.get("id") else None
                 team_name = team.get("name") or team.get("nickname") or "Equipo sin nombre"
                 identifiers = set()
                 
-                # ID de equipo
-                if team.get("id"):
-                    identifiers.add(str(team.get("id")).strip())
+                if team_id:
+                    identifiers.add(team_id)
                 
-                # Datos de propietarios
+                # Propietarios / Owners
                 for owner in team.get("owners", []):
                     if owner.get("id"):
                         identifiers.add(str(owner.get("id")).strip())
@@ -113,6 +113,7 @@ def get_fleaflicker_teams_info(league_id: str):
                         identifiers.add(str(user_obj.get("username")).strip())
 
                 teams_info.append({
+                    "team_id": team_id,
                     "team_name": team_name,
                     "identifiers": [i for i in identifiers if i]
                 })
@@ -121,10 +122,10 @@ def get_fleaflicker_teams_info(league_id: str):
 
     return teams_info
 
-def resolve_fleaflicker_username_to_team(fleaflicker_input: str, league_id: str):
+def resolve_fleaflicker_user_to_team(fleaflicker_input: str, league_id: str):
     """
-    Si el usuario ingresa un nombre de usuario de Fleaflicker (ej: Las1001),
-    esta función consulta sus ligas para obtener el nombre exacto de su equipo en esta liga.
+    Dado un username o ID de Fleaflicker (ej: 'Las1001' o '2056355'),
+    consulta la API para encontrar el ID y el Nombre de su equipo en la liga actual.
     """
     url_user = f"https://www.fleaflicker.com/api/FetchUserRosters?sport=NFL&username={fleaflicker_input}"
     try:
@@ -135,10 +136,12 @@ def resolve_fleaflicker_username_to_team(fleaflicker_input: str, league_id: str)
                 league = roster.get("league", {})
                 if str(league.get("id")) == str(league_id):
                     team = roster.get("team", {})
-                    return team.get("name") or team.get("nickname")
+                    team_id = str(team.get("id")) if team.get("id") else None
+                    team_name = team.get("name") or team.get("nickname")
+                    return team_id, team_name
     except Exception as e:
         logger.error(f"Error resolviendo usuario Fleaflicker '{fleaflicker_input}': {e}")
-    return None
+    return None, None
 
 # --- HANDLERS DE COMANDOS ---
 
@@ -156,10 +159,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/setAlerts <horas_user> <horas_commish>`\n"
         "  Ajusta el tiempo límite antes de enviar alertas en el draft.\n\n"
         "**2. Gestión de Managers y Equipos**\n"
-        "• `/vincular <id_fleaflicker>`\n"
+        "• `/vincular <id_o_usuario_fleaflicker>`\n"
         "  Vincula tu ID/Username de Fleaflicker con tu usuario de Telegram.\n"
-        "  _Ejemplo:_ `/vincular Las1001`\n\n"
-        "• `/vincular <id_fleaflicker> <@telegram_nick>`\n"
+        "  _Ejemplo:_ `/vincular Las1001` o `/vincular 1810351`\n\n"
+        "• `/vincular <id_o_usuario_fleaflicker> <@telegram_nick>`\n"
         "  (Commish) Vincula a otro usuario con su nick de Telegram.\n"
         "  _Ejemplo:_ `/vincular Las1001 @daovir`\n\n"
         "• `/managers`\n"
@@ -227,7 +230,7 @@ async def test_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         out = f"🔍 **Equipos e Identificadores en Liga `{league_id}`:**\n\n"
         for t in teams:
-            out += f"🏈 **{t['team_name']}**\nIDs/Users: `{', '.join(t['identifiers'])}`\n\n"
+            out += f"🏈 **{t['team_name']}** (Team ID: `{t['team_id']}`)\nIDs/Users: `{', '.join(t['identifiers'])}`\n\n"
 
         await update.message.reply_text(out, parse_mode="Markdown")
 
@@ -292,7 +295,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/vincular <id_fleaflicker>` o `/vincular <id_fleaflicker> <@telegram_nick>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Uso: `/vincular <id_o_usuario_fleaflicker>` o `/vincular <id_o_usuario_fleaflicker> <@telegram_nick>`", parse_mode="Markdown")
         return
 
     try:
@@ -316,34 +319,37 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Parsear argumentos
         if len(context.args) >= 2 and context.args[-1].startswith("@"):
             handle = context.args[-1].strip()
-            fleaflicker_id = " ".join(context.args[:-1]).strip()
+            fleaflicker_input = " ".join(context.args[:-1]).strip()
             telegram_id = None
         else:
-            fleaflicker_id = " ".join(context.args).strip()
+            fleaflicker_input = " ".join(context.args).strip()
             handle = f"@{user.username}" if user.username else f"@{user.first_name}"
             telegram_id = user.id
 
-        # 1. Intentar coincidencia directa por ID de equipo en la lista general de la liga
         teams = get_fleaflicker_teams_info(league_id)
+        target_team_id = None
         detected_team_name = None
 
+        # 1. Buscar coincidencia en los identificadores de los equipos de la liga
         for team in teams:
             for ident in team["identifiers"]:
-                if ident.lower() == fleaflicker_id.lower():
+                if ident.lower() == fleaflicker_input.lower():
+                    target_team_id = team["team_id"]
                     detected_team_name = team["team_name"]
                     break
             if detected_team_name:
                 break
 
-        # 2. Si no coincide con IDs de equipo, consultar el nombre de usuario directo en Fleaflicker
-        if not detected_team_name:
-            detected_team_name = resolve_fleaflicker_username_to_team(fleaflicker_id, league_id)
+        # 2. Si no coincide con los IDs de equipo, resolver el nombre de usuario en la API de Fleaflicker
+        if not target_team_id:
+            res_team_id, res_team_name = resolve_fleaflicker_user_to_team(fleaflicker_input, league_id)
+            if res_team_id:
+                target_team_id = res_team_id
+                detected_team_name = res_team_name
 
-        # 3. Formatear visualización
-        if not detected_team_name:
-            team_display = "Sin equipo asignado (Solo Manager/Commish)"
-        else:
-            team_display = detected_team_name
+        # Usar el ID del equipo como clave primaria de la DB si fue encontrado, o el input ingresado
+        db_key = target_team_id if target_team_id else fleaflicker_input
+        team_display = detected_team_name if detected_team_name else "Sin equipo asignado (Solo Manager/Commish)"
 
         cursor.execute("""
             INSERT INTO user_mappings (fleaflicker_id, team_name, telegram_handle, telegram_id)
@@ -353,7 +359,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 team_name = EXCLUDED.team_name,
                 telegram_handle = EXCLUDED.telegram_handle, 
                 telegram_id = COALESCE(EXCLUDED.telegram_id, user_mappings.telegram_id);
-        """, (fleaflicker_id, team_display, handle, telegram_id))
+        """, (db_key, team_display, handle, telegram_id))
 
         conn.commit()
         cursor.close()
@@ -361,7 +367,8 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"✅ **Vinculación Registrada:**\n\n"
-            f"• **ID Fleaflicker:** `{fleaflicker_id}`\n"
+            f"• **Usuario Fleaflicker:** `{fleaflicker_input}`\n"
+            f"• **ID Equipo:** `{db_key}`\n"
             f"• **Equipo:** {team_display}\n"
             f"• **Telegram:** {handle}",
             parse_mode="Markdown"
@@ -372,7 +379,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error al realizar la vinculación: `{e}`", parse_mode="Markdown")
 
 async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra la lista de vinculaciones guardadas."""
+    """Muestra la lista de vinculaciones guardadas haciendo match directo por Team ID."""
     chat_id = update.effective_chat.id
 
     try:
@@ -395,24 +402,28 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         teams = get_fleaflicker_teams_info(league_id)
-        
         db_map = {f_id.lower(): (t_name, t_handle) for f_id, t_name, t_handle in mappings}
 
         texto = f"📋 **Relación de Managers (`Liga {league_id}`)**\n\n"
 
         for team in teams:
             t_name = team["team_name"]
+            t_id = team["team_id"]
             matched_handle = None
-            matched_fid = None
 
-            for ident in team["identifiers"]:
-                if ident.lower() in db_map:
-                    matched_fid = ident
-                    _, matched_handle = db_map[ident.lower()]
-                    break
+            # 1. Match directo por Team ID (ej. 1810351)
+            if t_id and t_id.lower() in db_map:
+                _, matched_handle = db_map[t_id.lower()]
+
+            # 2. Match secundario por identificadores de owner si no hubo por Team ID
+            if not matched_handle:
+                for ident in team["identifiers"]:
+                    if ident.lower() in db_map:
+                        _, matched_handle = db_map[ident.lower()]
+                        break
 
             if matched_handle:
-                texto += f"🏈 **{t_name}**\n├ 🆔 Fleaflicker: `{matched_fid}`\n└ 👤 Telegram: {matched_handle}\n\n"
+                texto += f"🏈 **{t_name}**\n├ 🆔 Team ID: `{t_id}`\n└ 👤 Telegram: {matched_handle}\n\n"
             else:
                 texto += f"🏈 **{t_name}**\n└ ❌ *Sin vincular*\n\n"
 
