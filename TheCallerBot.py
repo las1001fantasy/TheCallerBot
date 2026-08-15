@@ -288,6 +288,8 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # --- COMANDOS REGISTRADOS ---
+    app.add_handler(CommandHandler("start", start))  # <-- AGREGAR ESTA LÍNEA
     app.add_handler(CommandHandler("setLeague", set_league))
     app.add_handler(CommandHandler("setAlerts", set_alerts))
     app.add_handler(CommandHandler("vincular", vincular))
