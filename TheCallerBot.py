@@ -26,9 +26,21 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 def init_db():
-    """Inicializa la estructura de tablas en PostgreSQL con mapeo global."""
+    """Inicializa la estructura de tablas y migra user_mappings si es necesario."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # 1. Comprobación y Migración Automática de la tabla antigua
+    try:
+        cursor.execute("ALTER TABLE user_mappings DROP COLUMN IF EXISTS chat_id CASCADE;")
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Aviso de migración (se resolverá recreando la tabla): {e}")
+        conn.rollback()
+        cursor.execute("DROP TABLE IF EXISTS user_mappings CASCADE;")
+        conn.commit()
+
+    # 2. Creación de la estructura correcta
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS leagues (
             chat_id BIGINT PRIMARY KEY,
@@ -39,7 +51,6 @@ def init_db():
             commish_alert_hours INT DEFAULT 8
         );
 
-        -- TABLA GLOBAL: Sin dependencia de chat_id para compartir el mapeo entre ligas
         CREATE TABLE IF NOT EXISTS user_mappings (
             platform_user_id VARCHAR(100) PRIMARY KEY,
             telegram_handle VARCHAR(50) NOT NULL,
@@ -216,21 +227,24 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
     """Tarea periódica que comprueba el borrador de Fleaflicker."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT chat_id, league_id, commish_handle, user_alert_hours, commish_alert_hours FROM leagues;")
-    active_leagues = cursor.fetchall()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id, league_id, commish_handle, user_alert_hours, commish_alert_hours FROM leagues;")
+        active_leagues = cursor.fetchall()
 
-    for chat_id, league_id, commish_handle, user_hours, commish_hours in active_leagues:
-        data = get_fleaflicker_draft_status(league_id)
-        if not data or "rows" not in data.get("minDraftBoard", {}):
-            continue
+        for chat_id, league_id, commish_handle, user_hours, commish_hours in active_leagues:
+            data = get_fleaflicker_draft_status(league_id)
+            if not data or "rows" not in data.get("minDraftBoard", {}):
+                continue
 
-        # Lógica de revisión OTC
-        pass
+            # Lógica de revisión OTC
+            pass
 
-    cursor.close()
-    conn.close()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error en check_otc_job: {e}")
 
 # --- MAIN ---
 
