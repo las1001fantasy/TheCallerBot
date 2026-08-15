@@ -91,13 +91,12 @@ def get_fleaflicker_teams_info(league_id: str):
                 team_name = team.get("name") or team.get("nickname") or "Equipo sin nombre"
                 identifiers = set()
                 
-                # 1. ID propio del equipo
+                # ID de equipo
                 if team.get("id"):
                     identifiers.add(str(team.get("id")).strip())
                 
-                # 2. Iterar sobre propietarios (owners) y extraer de obj 'user' embebido
+                # Datos de propietarios
                 for owner in team.get("owners", []):
-                    # Directos
                     if owner.get("id"):
                         identifiers.add(str(owner.get("id")).strip())
                     if owner.get("displayName"):
@@ -105,7 +104,6 @@ def get_fleaflicker_teams_info(league_id: str):
                     if owner.get("username"):
                         identifiers.add(str(owner.get("username")).strip())
                     
-                    # Objeto 'user' anidado (Estructura real de Fleaflicker API)
                     user_obj = owner.get("user", {})
                     if user_obj.get("id"):
                         identifiers.add(str(user_obj.get("id")).strip())
@@ -113,19 +111,34 @@ def get_fleaflicker_teams_info(league_id: str):
                         identifiers.add(str(user_obj.get("displayName")).strip())
                     if user_obj.get("username"):
                         identifiers.add(str(user_obj.get("username")).strip())
-                    if user_obj.get("name"):
-                        identifiers.add(str(user_obj.get("name")).strip())
 
                 teams_info.append({
                     "team_name": team_name,
                     "identifiers": [i for i in identifiers if i]
                 })
-        else:
-            logger.error(f"Fleaflicker API Error HTTP {res.status_code}")
     except Exception as e:
         logger.error(f"Error en FetchLeagueRosters: {e}")
 
     return teams_info
+
+def resolve_fleaflicker_username_to_team(fleaflicker_input: str, league_id: str):
+    """
+    Si el usuario ingresa un nombre de usuario de Fleaflicker (ej: Las1001),
+    esta función consulta sus ligas para obtener el nombre exacto de su equipo en esta liga.
+    """
+    url_user = f"https://www.fleaflicker.com/api/FetchUserRosters?sport=NFL&username={fleaflicker_input}"
+    try:
+        res = requests.get(url_user, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            for roster in data.get("rosters", []):
+                league = roster.get("league", {})
+                if str(league.get("id")) == str(league_id):
+                    team = roster.get("team", {})
+                    return team.get("name") or team.get("nickname")
+    except Exception as e:
+        logger.error(f"Error resolviendo usuario Fleaflicker '{fleaflicker_input}': {e}")
+    return None
 
 # --- HANDLERS DE COMANDOS ---
 
@@ -274,7 +287,7 @@ async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error en /setAlerts: {e}")
 
 async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Vincula Fleaflicker ID + Nombre del Equipo + Telegram Nick."""
+    """Vincula Fleaflicker ID/Username + Nombre del Equipo + Telegram Nick."""
     user = update.effective_user
     chat_id = update.effective_chat.id
 
@@ -310,7 +323,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
             handle = f"@{user.username}" if user.username else f"@{user.first_name}"
             telegram_id = user.id
 
-        # Buscar si el ID/Username de Fleaflicker pertenece a un equipo
+        # 1. Intentar coincidencia directa por ID de equipo en la lista general de la liga
         teams = get_fleaflicker_teams_info(league_id)
         detected_team_name = None
 
@@ -322,6 +335,11 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if detected_team_name:
                 break
 
+        # 2. Si no coincide con IDs de equipo, consultar el nombre de usuario directo en Fleaflicker
+        if not detected_team_name:
+            detected_team_name = resolve_fleaflicker_username_to_team(fleaflicker_id, league_id)
+
+        # 3. Formatear visualización
         if not detected_team_name:
             team_display = "Sin equipo asignado (Solo Manager/Commish)"
         else:
