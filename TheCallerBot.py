@@ -76,46 +76,62 @@ def init_db():
 
 def parse_team_data(team_obj):
     """
-    Auxiliar para procesar y estructurar la información de un equipo.
-    Extrae Team ID, User IDs, Usernames y DisplayNames de Fleaflicker.
+    Auxiliar para procesar la información de un equipo.
+    Extrae de forma limpia: team_id, team_name, user_id, username/displayName y todos los identificadores.
     """
     team_id = str(team_obj.get("id")).strip() if team_obj.get("id") else None
     team_name = team_obj.get("name") or team_obj.get("nickname") or "Equipo sin nombre"
+    
+    user_id = None
+    username = None
     identifiers = set()
 
-    # Guardar ID del equipo
     if team_id:
         identifiers.add(team_id)
 
-    # Procesar la lista de propietarios / owners
+    # Procesar owners/propietarios
     for owner in team_obj.get("owners", []):
-        # 1. Propiedades directas del objeto owner
+        # Datos directos de owner
         if owner.get("id"):
-            identifiers.add(str(owner.get("id")).strip())
-        if owner.get("displayName"):
-            identifiers.add(str(owner.get("displayName")).strip().lower())
+            u_id = str(owner.get("id")).strip()
+            user_id = user_id or u_id
+            identifiers.add(u_id)
         if owner.get("username"):
-            identifiers.add(str(owner.get("username")).strip().lower())
-        
-        # 2. Propiedades anidadas dentro del objeto 'user'
+            u_name = str(owner.get("username")).strip()
+            username = username or u_name
+            identifiers.add(u_name.lower())
+        if owner.get("displayName"):
+            u_disp = str(owner.get("displayName")).strip()
+            username = username or u_disp
+            identifiers.add(u_disp.lower())
+
+        # Datos anidados en user
         user_obj = owner.get("user", {})
         if user_obj:
             if user_obj.get("id"):
-                identifiers.add(str(user_obj.get("id")).strip())
-            if user_obj.get("displayName"):
-                identifiers.add(str(user_obj.get("displayName")).strip().lower())
+                u_id = str(user_obj.get("id")).strip()
+                user_id = user_id or u_id
+                identifiers.add(u_id)
             if user_obj.get("username"):
-                identifiers.add(str(user_obj.get("username")).strip().lower())
+                u_name = str(user_obj.get("username")).strip()
+                username = username or u_name
+                identifiers.add(u_name.lower())
+            if user_obj.get("displayName"):
+                u_disp = str(user_obj.get("displayName")).strip()
+                username = username or u_disp
+                identifiers.add(u_disp.lower())
 
     return {
         "team_id": team_id,
         "team_name": team_name,
+        "user_id": user_id or "Sin ID",
+        "username": username or "Sin Username",
         "identifiers": [i for i in identifiers if i]
     }
 
 def get_fleaflicker_teams_info(league_id: str):
     """
-    Obtiene los equipos e identificadores de usuarios probando múltiples endpoints de Fleaflicker.
+    Obtiene los equipos e identificadores probando múltiples endpoints de Fleaflicker.
     """
     teams_dict = {}
     current_year = datetime.now(timezone.utc).year
@@ -135,7 +151,7 @@ def get_fleaflicker_teams_info(league_id: str):
                     parsed = parse_team_data(team)
                     if parsed["team_id"]:
                         teams_dict[parsed["team_id"]] = parsed
-                if teams_dict and any(len(t["identifiers"]) > 1 for t in teams_dict.values()):
+                if teams_dict and any(t["user_id"] != "Sin ID" for t in teams_dict.values()):
                     return list(teams_dict.values())
         except Exception as e:
             logger.error(f"Error en FetchLeagueRosters ({url}): {e}")
@@ -157,16 +173,19 @@ def get_fleaflicker_teams_info(league_id: str):
                             if parsed["team_id"] not in teams_dict:
                                 teams_dict[parsed["team_id"]] = parsed
                             else:
-                                # Fusionar identificadores
                                 teams_dict[parsed["team_id"]]["identifiers"] = list(
                                     set(teams_dict[parsed["team_id"]]["identifiers"] + parsed["identifiers"])
                                 )
+                                if teams_dict[parsed["team_id"]]["user_id"] == "Sin ID":
+                                    teams_dict[parsed["team_id"]]["user_id"] = parsed["user_id"]
+                                if teams_dict[parsed["team_id"]]["username"] == "Sin Username":
+                                    teams_dict[parsed["team_id"]]["username"] = parsed["username"]
                 if teams_dict:
                     return list(teams_dict.values())
         except Exception as e:
             logger.error(f"Error en FetchLeagueStandings ({url}): {e}")
 
-    # 3. Probar FetchLeagueDraftBoard si la liga está en fase de borrador/draft
+    # 3. Probar FetchLeagueDraftBoard si la liga está en fase de draft
     urls_draft = [
         f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}",
         f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=NFL&league_id={league_id}"
@@ -277,21 +296,31 @@ async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error al guardar la liga.")
 
 async def test_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando de depuración para probar la extracción de Fleaflicker."""
+    """Comando de depuración formateado: User ID - Fleaflicker User - Telegram Nick."""
     chat_id = update.effective_chat.id
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
         cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
         league_row = cursor.fetchone()
-        cursor.close()
-        conn.close()
 
         if not league_row:
+            cursor.close()
+            conn.close()
             await update.message.reply_text("⚠️ No hay liga asociada a este chat. Usa `/setLeague <league_id> <@commish>` primero.")
             return
 
         league_id = league_row[0]
+
+        # Obtener mapeos de Telegram de la BD
+        cursor.execute("SELECT fleaflicker_id, telegram_handle FROM user_mappings;")
+        mappings = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        db_map = {f_id.lower(): t_handle for f_id, t_handle in mappings}
+
         teams = get_fleaflicker_teams_info(league_id)
 
         if not teams:
@@ -300,7 +329,24 @@ async def test_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         out = f"🔍 **Equipos e Identificadores en Liga `{league_id}`:**\n\n"
         for t in teams:
-            out += f"🏈 **{t['team_name']}** (Team ID: `{t['team_id']}`)\nIDs/Users: `{', '.join(t['identifiers'])}`\n\n"
+            t_id = t['team_id']
+            u_id = t['user_id']
+            u_name = t['username']
+            matched_handle = None
+
+            # Buscar vínculo por Team ID o por identificadores del usuario
+            if t_id and t_id.lower() in db_map:
+                matched_handle = db_map[t_id.lower()]
+            else:
+                for ident in t['identifiers']:
+                    if ident.lower() in db_map:
+                        matched_handle = db_map[ident.lower()]
+                        break
+
+            telegram_display = matched_handle if matched_handle else "Sin vincular"
+            
+            out += f"🏈 **{t['team_name']}** (Team ID: `{t_id}`)\n"
+            out += f"IDs/Users: `{u_id} - {u_name} - {telegram_display}`\n\n"
 
         await update.message.reply_text(out, parse_mode="Markdown")
 
