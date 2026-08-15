@@ -56,6 +56,18 @@ def init_db():
             commish_alert_sent BOOLEAN DEFAULT FALSE
         );
     """)
+
+    # Migración/Ajuste automático para evitar errores si la columna anterior existía
+    try:
+        cursor.execute("ALTER TABLE user_mappings RENAME COLUMN platform_user_id TO fleaflicker_id;")
+    except Exception:
+        pass  # Si la columna ya se llama fleaflicker_id o no existe la antigua, ignorar
+    
+    try:
+        cursor.execute("ALTER TABLE user_mappings ADD COLUMN IF NOT EXISTS team_name VARCHAR(150);")
+    except Exception:
+        pass
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -63,13 +75,7 @@ def init_db():
 # --- FUNCIONES AUXILIARES DE FLEAFLICKER ---
 
 def get_fleaflicker_teams_info(league_id: str):
-    """
-    Obtiene un diccionario ordenado con la información completa de Fleaflicker:
-    {
-       "team_name": str,
-       "owner_identifiers": list[str]
-    }
-    """
+    """Obtiene un listado con el Nombre del Equipo e identificadores de Fleaflicker."""
     teams_info = []
     url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
     
@@ -113,12 +119,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/desvincularLiga` - Desvincula la liga actual del chat.\n\n"
         "**2. Vinculación de Managers**\n"
         "• `/vincular <fleaflicker_id>`\n"
-        "  Vincula tu ID/Nick de Fleaflicker a tu usuario de Telegram y detecta el nombre de tu equipo.\n"
+        "  Vincula tu ID/Nick de Fleaflicker a tu usuario de Telegram.\n"
         "  _Ejemplo:_ `/vincular Las1001`\n\n"
         "• `/vincular <fleaflicker_id> <@telegram_nick>`\n"
-        "  (Admin) Vincula a un manager especificando su ID de Fleaflicker y su Telegram.\n"
+        "  (Admin) Vincula indicando ID de Fleaflicker y Nick de Telegram.\n"
         "  _Ejemplo:_ `/vincular Las1001 @daovir`\n\n"
-        "• `/managers` - Muestra la relación entre Equipos, Fleaflicker IDs y Nicks de Telegram."
+        "• `/managers` - Muestra la lista de vinculaciones."
     )
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
@@ -137,19 +143,23 @@ async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     league_id = context.args[0]
     commish_handle = context.args[1]
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO leagues (chat_id, platform, league_id, commish_handle)
-        VALUES (%s, 'fleaflicker', %s, %s)
-        ON CONFLICT (chat_id) DO UPDATE 
-        SET league_id = EXCLUDED.league_id, commish_handle = EXCLUDED.commish_handle;
-    """, (chat_id, league_id, commish_handle))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO leagues (chat_id, platform, league_id, commish_handle)
+            VALUES (%s, 'fleaflicker', %s, %s)
+            ON CONFLICT (chat_id) DO UPDATE 
+            SET league_id = EXCLUDED.league_id, commish_handle = EXCLUDED.commish_handle;
+        """, (chat_id, league_id, commish_handle))
+        conn.commit()
+        cursor.close()
+        conn.close()
 
-    await update.message.reply_text(f"✅ Liga `{league_id}` configurada correctamente.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Liga `{league_id}` configurada correctamente.", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error en /setLeague: {e}")
+        await update.message.reply_text("❌ Error al guardar la liga en la base de datos.")
 
 async def desvincular_liga(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -168,6 +178,7 @@ async def desvincular_liga(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ No había ninguna liga vinculada.")
     except Exception as e:
         logger.error(f"Error en /desvincularLiga: {e}")
+        await update.message.reply_text("❌ Error al desvincular la liga.")
 
 async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Vincula Fleaflicker ID + Nombre del Equipo + Telegram Nick."""
@@ -175,65 +186,63 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if not context.args:
-        await update.message.reply_text("Uso: `/vincular <id_fleaflicker>` o `/vincular <id_fleaflicker> <@telegram_nick>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Uso: `/vincular <id_fleaflicker>` o `/vincular <id_fleaflicker> <@telegram_nick>`", parse_mode="Markdown")
         return
 
-    # 1. Obtener la liga configurada en el chat
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
-    league_row = cursor.fetchone()
-    
-    if not league_row:
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
+        league_row = cursor.fetchone()
+
+        # Parsear argumentos de entrada
+        if len(context.args) >= 2 and context.args[-1].startswith("@"):
+            handle = context.args[-1].strip()
+            fleaflicker_id = " ".join(context.args[:-1]).strip()
+            telegram_id = None
+        else:
+            fleaflicker_id = " ".join(context.args).strip()
+            handle = f"@{user.username}" if user.username else f"@{user.first_name}"
+            telegram_id = user.id
+
+        detected_team_name = "Sin asignar a liga"
+
+        # Si hay liga asociada a este chat, buscar el nombre exacto del equipo en Fleaflicker
+        if league_row:
+            league_id = league_row[0]
+            teams = get_fleaflicker_teams_info(league_id)
+            for team in teams:
+                for ident in team["identifiers"]:
+                    if ident.lower() == fleaflicker_id.lower():
+                        detected_team_name = team["team_name"]
+                        break
+
+        # Inserción con persistencia asegurada
+        cursor.execute("""
+            INSERT INTO user_mappings (fleaflicker_id, team_name, telegram_handle, telegram_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (fleaflicker_id) 
+            DO UPDATE SET 
+                team_name = EXCLUDED.team_name,
+                telegram_handle = EXCLUDED.telegram_handle, 
+                telegram_id = COALESCE(EXCLUDED.telegram_id, user_mappings.telegram_id);
+        """, (fleaflicker_id, detected_team_name, handle, telegram_id))
+
+        conn.commit()
         cursor.close()
         conn.close()
-        await update.message.reply_text("⚠️ Configura primero la liga en este chat con `/setLeague <league_id> <@comisionado>`")
-        return
 
-    league_id = league_row[0]
+        await update.message.reply_text(
+            f"✅ **Vinculación Registrada:**\n\n"
+            f"• **ID Fleaflicker:** `{fleaflicker_id}`\n"
+            f"• **Equipo:** {detected_team_name}\n"
+            f"• **Telegram:** {handle}",
+            parse_mode="Markdown"
+        )
 
-    # 2. Parsear argumentos
-    if len(context.args) >= 2 and context.args[-1].startswith("@"):
-        handle = context.args[-1].strip()
-        fleaflicker_id = " ".join(context.args[:-1]).strip()
-        telegram_id = None
-    else:
-        fleaflicker_id = " ".join(context.args).strip()
-        handle = f"@{user.username}" if user.username else f"@{user.first_name}"
-        telegram_id = user.id
-
-    # 3. Buscar el nombre del equipo correspondiente al ID de Fleaflicker
-    teams = get_fleaflicker_teams_info(league_id)
-    detected_team_name = "Desconocido (No encontrado en la liga)"
-
-    for team in teams:
-        for ident in team["identifiers"]:
-            if ident.lower() == fleaflicker_id.lower():
-                detected_team_name = team["team_name"]
-                break
-
-    # 4. Guardar la triple relación en PostgreSQL
-    cursor.execute("""
-        INSERT INTO user_mappings (fleaflicker_id, team_name, telegram_handle, telegram_id)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (fleaflicker_id) 
-        DO UPDATE SET 
-            team_name = EXCLUDED.team_name,
-            telegram_handle = EXCLUDED.telegram_handle, 
-            telegram_id = COALESCE(EXCLUDED.telegram_id, user_mappings.telegram_id);
-    """, (fleaflicker_id, detected_team_name, handle, telegram_id))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await update.message.reply_text(
-        f"✅ **Vinculación Registrada:**\n\n"
-        f"• **ID Fleaflicker:** `{fleaflicker_id}`\n"
-        f"• **Equipo:** {detected_team_name}\n"
-        f"• **Telegram:** {handle}",
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        logger.error(f"Error en /vincular: {e}")
+        await update.message.reply_text(f"❌ Error interno al realizar la vinculación: `{e}`", parse_mode="Markdown")
 
 async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra la lista de vinculaciones guardadas."""
@@ -249,7 +258,7 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not league_row:
             cursor.close()
             conn.close()
-            await update.message.reply_text("⚠️ Configura primero la liga con `/setLeague`.")
+            await update.message.reply_text("⚠️ Configura primero la liga con `/setLeague <league_id> <@comisionado>`.")
             return
 
         league_id = league_row[0]
@@ -260,10 +269,8 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         teams = get_fleaflicker_teams_info(league_id)
         
-        # Mapeo indexado por identificador
-        db_map = {}
-        for f_id, t_name, t_handle in mappings:
-            db_map[f_id.lower()] = (t_name, t_handle)
+        # Mapeo indexado por identificador en minúsculas
+        db_map = {f_id.lower(): (t_name, t_handle) for f_id, t_name, t_handle in mappings}
 
         texto = f"📋 **Relación de Managers (`Liga {league_id}`)**\n\n"
 
