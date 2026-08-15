@@ -26,21 +26,10 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 def init_db():
-    """Inicializa la estructura de tablas y migra user_mappings si es necesario."""
+    """Inicializa la estructura de tablas garantizando la persistencia de datos."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # 1. Comprobación y Migración Automática de la tabla antigua
-    try:
-        cursor.execute("ALTER TABLE user_mappings DROP COLUMN IF EXISTS chat_id CASCADE;")
-        conn.commit()
-    except Exception as e:
-        logger.warning(f"Aviso de migración (se resolverá recreando la tabla): {e}")
-        conn.rollback()
-        cursor.execute("DROP TABLE IF EXISTS user_mappings CASCADE;")
-        conn.commit()
 
-    # 2. Creación de la estructura correcta
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS leagues (
             chat_id BIGINT PRIMARY KEY,
@@ -84,36 +73,93 @@ def get_fleaflicker_draft_status(league_id: str):
     return None
 
 def get_fleaflicker_teams(league_id: str):
-    """Obtiene el mapa {user_id: team_name} desde Fleaflicker."""
-    url = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
-    teams_map = {}
+    """Obtiene una lista de tuplas (team_name, set_of_identifiers) desde Fleaflicker."""
+    teams = []
+    
+    url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
+        res = requests.get(url_rosters, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
             for roster in data.get("rosters", []):
                 team = roster.get("team", {})
-                team_name = team.get("name", "Sin Nombre")
-                owners = team.get("owners", [])
-                for owner in owners:
-                    owner_id = str(owner.get("id"))
-                    teams_map[owner_id] = team_name
+                team_name = team.get("name") or team.get("nickname") or "Equipo sin nombre"
+                identifiers = set()
+                
+                if team.get("id"):
+                    identifiers.add(str(team.get("id")))
+                
+                for owner in team.get("owners", []):
+                    if owner.get("id"):
+                        identifiers.add(str(owner.get("id")))
+                    if owner.get("displayName"):
+                        identifiers.add(str(owner.get("displayName")).lower())
+                    if owner.get("username"):
+                        identifiers.add(str(owner.get("username")).lower())
+                
+                if identifiers:
+                    teams.append((team_name, identifiers))
     except Exception as e:
-        logger.error(f"Error al obtener equipos de Fleaflicker: {e}")
-    return teams_map
+        logger.error(f"Error en FetchLeagueRosters: {e}")
+
+    if teams:
+        return teams
+
+    # Fallback a DraftBoard
+    data_draft = get_fleaflicker_draft_status(league_id)
+    if data_draft:
+        rows = data_draft.get("minDraftBoard", {}).get("rows", [])
+        teams_dict = {}
+        for row in rows:
+            for cell in row.get("cells", []):
+                team = cell.get("team", {})
+                t_id = team.get("id")
+                t_name = team.get("name") or team.get("nickname")
+                if t_id and t_name and t_id not in teams_dict:
+                    identifiers = {str(t_id)}
+                    for owner in team.get("owners", []):
+                        if owner.get("id"):
+                            identifiers.add(str(owner.get("id")))
+                        if owner.get("displayName"):
+                            identifiers.add(str(owner.get("displayName")).lower())
+                    teams_dict[t_id] = (t_name, identifiers)
+        teams = list(teams_dict.values())
+
+    return teams
 
 # --- HANDLERS DE COMANDOS ---
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra la guía completa de instrucciones y comandos del bot."""
+    mensaje = (
+        "📖 **Guía de Uso del Bot**\n\n"
+        "**1. Configuración de Ligas**\n"
+        "• `/setLeague <league_id> <@comisionado>`\n"
+        "  Asocia una liga de Fleaflicker a este chat.\n"
+        "  _Ejemplo:_ `/setLeague 346999 @bocamolls`\n\n"
+        "• `/desvincularLiga`\n"
+        "  Elimina la liga configurada en este chat si te has equivocado.\n\n"
+        "• `/setAlerts <horas_user> <horas_commish>`\n"
+        "  Ajusta el tiempo de espera antes de notificar al manager en turno o al comisionado.\n"
+        "  _Ejemplo:_ `/setAlerts 2 8`\n\n"
+        "**2. Gestión de Managers**\n"
+        "• `/vincular <id_o_user_fleaflicker>`\n"
+        "  Vincula tu propio ID o Username de Fleaflicker con tu Telegram.\n"
+        "  _Ejemplo:_ `/vincular Las1001`\n\n"
+        "• `/vincular <id_o_user_fleaflicker> <@telegram_nick>`\n"
+        "  (Comisionado/Admin) Vincula o reasigna a otro manager manualmente.\n"
+        "  _Ejemplo:_ `/vincular Las1001 @daovir`\n\n"
+        "• `/managers`\n"
+        "  Muestra la lista de equipos de la liga actual y sus usuarios asignados.\n\n"
+        "💡 *Nota:* La vinculación de managers es global. Si un manager se vincula una vez, el bot lo reconocerá automáticamente en cualquier otra liga donde juegue."
+    )
+    await update.message.reply_text(mensaje, parse_mode="Markdown")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde al comando /start con el menú de ayuda."""
+    """Responde al comando /start con una bienvenida e indicación de ayuda."""
     await update.message.reply_text(
         "¡Hola! El bot está iniciado y listo.\n\n"
-        "**Comandos disponibles:**\n"
-        "• `/vincular <id_fleaflicker>` - Vincular tu propia cuenta\n"
-        "• `/vincular <id_fleaflicker> <@nick>` - Vincular a otro manager\n"
-        "• `/setLeague <league_id> <commish>` - Configurar la liga de este chat\n"
-        "• `/setAlerts <h_user> <h_commish>` - Configurar avisos\n"
-        "• `/managers` - Ver los equipos y managers vinculados",
+        "Usa `/help` para ver la lista completa de comandos e instrucciones de configuración.",
         parse_mode="Markdown"
     )
 
@@ -121,7 +167,7 @@ async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Configura la liga de Fleaflicker asociada a este chat."""
     chat_id = update.effective_chat.id
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: `/setLeague <league_id> <commish_handle>` (ej: `/setLeague 123456 @comisionado`)", parse_mode="Markdown")
+        await update.message.reply_text("Uso: `/setLeague <league_id> <commish_handle>` (ej: `/setLeague 346999 @comisionado`)", parse_mode="Markdown")
         return
 
     league_id = context.args[0]
@@ -140,6 +186,27 @@ async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     await update.message.reply_text(f"✅ Liga `{league_id}` configurada para este chat. Comisionado: {commish_handle}", parse_mode="Markdown")
+
+async def desvincular_liga(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina la vinculación de la liga en el chat actual."""
+    chat_id = update.effective_chat.id
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM leagues WHERE chat_id = %s;", (chat_id,))
+        rows_deleted = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        if rows_deleted > 0:
+            await update.message.reply_text("🗑️ **Liga desvinculada.** Puedes volver a configurar una nueva con `/setLeague`.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ No hay ninguna liga vinculada actualmente a este chat.")
+    except Exception as e:
+        logger.error(f"Error en /desvincularLiga: {e}")
+        await update.message.reply_text("❌ Hubo un error al desvincular la liga.")
 
 async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ajusta las horas de aviso para el manager en turno y el comisionado."""
@@ -169,24 +236,23 @@ async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏰ Alertas actualizadas: Aviso a usuario a las {user_hours}h, aviso a comisionado a las {commish_hours}h.")
 
 async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mapea el ID de Fleaflicker con un nick de Telegram (propio o de un tercero)."""
+    """Mapea o reasigna el ID de Fleaflicker con un usuario de Telegram."""
     user = update.effective_user
 
     if len(context.args) < 1:
         await update.message.reply_text(
             "⚠️ **Uso del comando /vincular:**\n\n"
-            "• **Para ti:** `/vincular <id_fleaflicker>`\n"
-            "• **Para otro:** `/vincular <id_fleaflicker> <@telegram_nick>`\n\n"
-            "Ejemplo: `/vincular 123456 @JuanPerez`",
+            "• **Para ti:** `/vincular <id_o_user_fleaflicker>`\n"
+            "• **Para otro:** `/vincular <id_o_user_fleaflicker> <@telegram_nick>`\n\n"
+            "Ejemplo: `/vincular Las1001 @daovir`",
             parse_mode="Markdown"
         )
         return
 
-    fleaflicker_id = context.args[0]
+    fleaflicker_id = context.args[0].strip()
 
-    # Determinar si vincula al usuario actual o a un tercero
     if len(context.args) >= 2:
-        handle = context.args[1]
+        handle = context.args[1].strip()
         if not handle.startswith("@"):
             handle = f"@{handle}"
         telegram_id = None
@@ -197,6 +263,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
         cursor.execute("""
             INSERT INTO user_mappings (platform_user_id, telegram_handle, telegram_id)
             VALUES (%s, %s, %s)
@@ -210,8 +277,8 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         await update.message.reply_text(
-            f"✅ **Mapeo guardado exitosamente:**\n"
-            f"• Fleaflicker ID: `{fleaflicker_id}`\n"
+            f"✅ **Mapeo guardado/actualizado:**\n"
+            f"• Identificador Fleaflicker: `{fleaflicker_id}`\n"
             f"• Telegram: {handle}", 
             parse_mode="Markdown"
         )
@@ -227,13 +294,11 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Obtener la liga configurada para este chat
         cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
         league_row = cursor.fetchone()
         
-        # 2. Obtener los mapeos globales de la BD
         cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings;")
-        mappings = dict(cursor.fetchall())  # { "id_fleaflicker": "@nick" }
+        mappings_raw = cursor.fetchall()
         
         cursor.close()
         conn.close()
@@ -243,23 +308,36 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         league_id = league_row[0]
+        mappings = {str(k).lower(): v for k, v in mappings_raw}
+        teams = get_fleaflicker_teams(league_id)
 
-        # 3. Traer los equipos directamente de la API de Fleaflicker
-        teams_map = get_fleaflicker_teams(league_id)
-
-        if not teams_map:
-            await update.message.reply_text("⚠️ No se pudieron obtener los equipos desde Fleaflicker. Revisa si el `league_id` es correcto.")
+        if not teams:
+            await update.message.reply_text(
+                f"⚠️ **No se pudieron obtener los equipos desde Fleaflicker.**\n\n"
+                f"• Revisa que el ID de liga sea puramente numérico (ej: `346999`).\n"
+                f"• Si te equivocaste, desvincula esta liga con `/desvincularLiga` y configúrala de nuevo con `/setLeague`.",
+                parse_mode="Markdown"
+            )
             return
 
-        texto = "📋 **Estado de Managers en la Liga**\n\n"
+        texto = f"📋 **Estado de Managers en la Liga (`{league_id}`)**\n\n"
         
-        # 4. Construir la lista mostrando Equipo ➔ Telegram Nick
-        for f_id, team_name in teams_map.items():
-            handle = mappings.get(f_id)
-            if handle:
-                texto += f"🏈 **{team_name}**\n└ 👤 {handle} (`{f_id}`)\n\n"
+        for team_name, identifiers in teams:
+            matched_handle = None
+            matched_id = None
+
+            for ident in identifiers:
+                ident_lower = ident.lower()
+                if ident_lower in mappings:
+                    matched_handle = mappings[ident_lower]
+                    matched_id = ident
+                    break
+
+            if matched_handle:
+                texto += f"🏈 **{team_name}**\n└ 👤 {matched_handle} (`{matched_id}`)\n\n"
             else:
-                texto += f"🏈 **{team_name}**\n└ ❌ *Sin vincular* (`{f_id}`)\n\n"
+                sample_id = next(iter(identifiers)) if identifiers else "N/A"
+                texto += f"🏈 **{team_name}**\n└ ❌ *Sin vincular* (ID: `{sample_id}`)\n\n"
 
         await update.message.reply_text(texto, parse_mode="Markdown")
 
@@ -296,14 +374,15 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Registro de Handlers
+    # Registro de Handlers de Comandos
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("setLeague", set_league))
+    app.add_handler(CommandHandler("desvincularLiga", desvincular_liga))
     app.add_handler(CommandHandler("setAlerts", set_alerts))
     app.add_handler(CommandHandler("vincular", vincular))
     app.add_handler(CommandHandler("managers", list_managers))
 
-    # Tarea repetitiva cada 90 segundos
     if app.job_queue:
         app.job_queue.run_repeating(check_otc_job, interval=90, first=10)
 
