@@ -74,58 +74,81 @@ def init_db():
 
 # --- FUNCIONES AUXILIARES DE FLEAFLICKER ---
 
+def parse_team_data(team_obj):
+    """Auxiliar para procesar y estructurar la información de un equipo."""
+    team_id = str(team_obj.get("id")).strip() if team_obj.get("id") else None
+    team_name = team_obj.get("name") or team_obj.get("nickname") or "Equipo sin nombre"
+    identifiers = set()
+
+    if team_id:
+        identifiers.add(team_id)
+
+    for owner in team_obj.get("owners", []):
+        if owner.get("id"):
+            identifiers.add(str(owner.get("id")).strip())
+        if owner.get("displayName"):
+            identifiers.add(str(owner.get("displayName")).strip().lower())
+        if owner.get("username"):
+            identifiers.add(str(owner.get("username")).strip().lower())
+        
+        user_obj = owner.get("user", {})
+        if user_obj.get("id"):
+            identifiers.add(str(user_obj.get("id")).strip())
+        if user_obj.get("displayName"):
+            identifiers.add(str(user_obj.get("displayName")).strip().lower())
+        if user_obj.get("username"):
+            identifiers.add(str(user_obj.get("username")).strip().lower())
+
+    return {
+        "team_id": team_id,
+        "team_name": team_name,
+        "identifiers": [i for i in identifiers if i]
+    }
+
 def get_fleaflicker_teams_info(league_id: str):
     """
-    Obtiene todos los equipos de la liga desde Fleaflicker extrayendo
-    tanto IDs de equipo como IDs de usuario, usernames y nicknames.
+    Obtiene los equipos de la liga desde Fleaflicker.
+    Si la liga está drafteando, recurre a FetchLeagueDraftBoard.
     """
-    teams_info = []
+    teams_dict = {}
+
+    # 1. Intentar vía FetchLeagueRosters
     url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=nfl&league_id={league_id}"
-    
     try:
         res = requests.get(url_rosters, timeout=10)
         if res.status_code == 200:
             data = res.json()
             for roster in data.get("rosters", []):
                 team = roster.get("team", {})
-                team_id = str(team.get("id")).strip() if team.get("id") else None
-                team_name = team.get("name") or team.get("nickname") or "Equipo sin nombre"
-                identifiers = set()
-                
-                if team_id:
-                    identifiers.add(team_id)
-                
-                # Extraer datos de los propietarios
-                for owner in team.get("owners", []):
-                    if owner.get("id"):
-                        identifiers.add(str(owner.get("id")).strip())
-                    if owner.get("displayName"):
-                        identifiers.add(str(owner.get("displayName")).strip().lower())
-                    if owner.get("username"):
-                        identifiers.add(str(owner.get("username")).strip().lower())
-                    
-                    user_obj = owner.get("user", {})
-                    if user_obj.get("id"):
-                        identifiers.add(str(user_obj.get("id")).strip())
-                    if user_obj.get("displayName"):
-                        identifiers.add(str(user_obj.get("displayName")).strip().lower())
-                    if user_obj.get("username"):
-                        identifiers.add(str(user_obj.get("username")).strip().lower())
-
-                teams_info.append({
-                    "team_id": team_id,
-                    "team_name": team_name,
-                    "identifiers": [i for i in identifiers if i]
-                })
+                parsed = parse_team_data(team)
+                if parsed["team_id"]:
+                    teams_dict[parsed["team_id"]] = parsed
     except Exception as e:
         logger.error(f"Error en FetchLeagueRosters: {e}")
 
-    return teams_info
+    # 2. Si no devolvió rosters (por estar en Draft activo), consultar FetchLeagueDraftBoard
+    if not teams_dict:
+        url_draft = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}"
+        try:
+            res = requests.get(url_draft, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                # Extraer equipos desde el orden de las rondas del draft
+                rows = data.get("rows", [])
+                for row in rows:
+                    for cell in row.get("cells", []):
+                        team = cell.get("team", {})
+                        if team and team.get("id"):
+                            parsed = parse_team_data(team)
+                            if parsed["team_id"] not in teams_dict:
+                                teams_dict[parsed["team_id"]] = parsed
+        except Exception as e:
+            logger.error(f"Error en FetchLeagueDraftBoard: {e}")
+
+    return list(teams_dict.values())
 
 def resolve_fleaflicker_user_to_team(fleaflicker_input: str, league_id: str):
-    """
-    Consulta directa a FetchUserRosters con soporte minúsculas para 'sport=nfl'.
-    """
+    """Consulta FetchUserRosters para localizar el ID de equipo de un manager."""
     url_user = f"https://www.fleaflicker.com/api/FetchUserRosters?sport=nfl&username={fleaflicker_input}"
     try:
         res = requests.get(url_user, timeout=10)
@@ -329,7 +352,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_team_id = None
         detected_team_name = None
 
-        # 1. Buscar coincidencia insensible a mayúsculas en los identificadores de la liga
+        # 1. Buscar coincidencia en identificadores de equipos de la liga
         for team in teams:
             for ident in team["identifiers"]:
                 if ident.lower() == fleaflicker_input.lower():
@@ -339,14 +362,13 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if detected_team_name:
                 break
 
-        # 2. Si no coincide localmente, consultar la API de FetchUserRosters
+        # 2. Si no se encontró en la matriz directa, buscar vía FetchUserRosters
         if not target_team_id:
             res_team_id, res_team_name = resolve_fleaflicker_user_to_team(fleaflicker_input, league_id)
             if res_team_id:
                 target_team_id = res_team_id
                 detected_team_name = res_team_name
 
-        # Usar el ID del equipo como clave primaria de la base de datos
         if target_team_id:
             db_key = target_team_id
             team_display = detected_team_name
@@ -414,7 +436,7 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t_id = team["team_id"]
             matched_handle = None
 
-            # 1. Match por Team ID (ej. 1810351)
+            # 1. Match por Team ID
             if t_id and t_id.lower() in db_map:
                 _, matched_handle = db_map[t_id.lower()]
 
