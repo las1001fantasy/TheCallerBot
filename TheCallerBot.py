@@ -26,7 +26,7 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 def init_db():
-    """Inicializa la estructura de tablas en PostgreSQL."""
+    """Inicializa la estructura de tablas en PostgreSQL con mapeo global."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -39,7 +39,7 @@ def init_db():
             commish_alert_hours INT DEFAULT 8
         );
 
-        -- TABLA GLOBAL: Sin chat_id para compartir el mapeo entre múltiples ligas
+        -- TABLA GLOBAL: Sin dependencia de chat_id para compartir el mapeo entre ligas
         CREATE TABLE IF NOT EXISTS user_mappings (
             platform_user_id VARCHAR(100) PRIMARY KEY,
             telegram_handle VARCHAR(50) NOT NULL,
@@ -75,14 +75,15 @@ def get_fleaflicker_draft_status(league_id: str):
 # --- HANDLERS DE COMANDOS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Responde al comando /start."""
+    """Responde al comando /start con el menú de ayuda."""
     await update.message.reply_text(
         "¡Hola! El bot está iniciado y listo.\n\n"
-        "Comandos disponibles:\n"
-        "• `/vincular <id_fleaflicker>` - Mapea tu ID globalmente\n"
-        "• `/setLeague <league_id> <commish_handle>` - Configura la liga de este chat\n"
-        "• `/setAlerts <horas_usuario> <horas_commish>` - Ajusta los tiempos de las alertas\n"
-        "• `/managers` - Muestra la lista de managers mapeados",
+        "**Comandos disponibles:**\n"
+        "• `/vincular <id_fleaflicker>` - Vincular tu propia cuenta\n"
+        "• `/vincular <id_fleaflicker> <@nick>` - Vincular a otro manager\n"
+        "• `/setLeague <league_id> <commish>` - Configurar la liga de este chat\n"
+        "• `/setAlerts <h_user> <h_commish>` - Configurar avisos\n"
+        "• `/managers` - Ver los vinculados globalmente",
         parse_mode="Markdown"
     )
 
@@ -138,52 +139,83 @@ async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏰ Alertas actualizadas: Aviso a usuario a las {user_hours}h, aviso a comisionado a las {commish_hours}h.")
 
 async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mapea globalmente el ID de Fleaflicker con el nick de Telegram."""
+    """Mapea el ID de Fleaflicker con un nick de Telegram (propio o de un tercero)."""
     user = update.effective_user
-    if not context.args:
-        await update.message.reply_text("Uso: `/vincular <fleaflicker_user_id>`", parse_mode="Markdown")
+
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "⚠️ **Uso del comando /vincular:**\n\n"
+            "• **Para ti:** `/vincular <id_fleaflicker>`\n"
+            "• **Para otro:** `/vincular <id_fleaflicker> <@telegram_nick>`\n\n"
+            "Ejemplo: `/vincular 123456 @JuanPerez`",
+            parse_mode="Markdown"
+        )
         return
 
     fleaflicker_id = context.args[0]
-    handle = f"@{user.username}" if user.username else user.first_name
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_mappings (platform_user_id, telegram_handle, telegram_id)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (platform_user_id) 
-        DO UPDATE SET telegram_handle = EXCLUDED.telegram_handle, telegram_id = EXCLUDED.telegram_id;
-    """, (fleaflicker_id, handle, user.id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # Determinar si vincula al usuario actual o a un tercero
+    if len(context.args) >= 2:
+        handle = context.args[1]
+        if not handle.startswith("@"):
+            handle = f"@{handle}"
+        telegram_id = None
+    else:
+        handle = f"@{user.username}" if user.username else f"@{user.first_name}"
+        telegram_id = user.id
 
-    await update.message.reply_text(f"✅ Mapeo global guardado: `{fleaflicker_id}` ➔ {handle}\nYa no requerirá vincularse en otras ligas.", parse_mode="Markdown")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_mappings (platform_user_id, telegram_handle, telegram_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (platform_user_id) 
+            DO UPDATE SET telegram_handle = EXCLUDED.telegram_handle, 
+                          telegram_id = COALESCE(EXCLUDED.telegram_id, user_mappings.telegram_id);
+        """, (fleaflicker_id, handle, telegram_id))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        await update.message.reply_text(
+            f"✅ **Mapeo guardado exitosamente:**\n"
+            f"• Fleaflicker ID: `{fleaflicker_id}`\n"
+            f"• Telegram: {handle}", 
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error en /vincular: {e}")
+        await update.message.reply_text("❌ Hubo un error al guardar la vinculación en la base de datos.")
 
 async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra el listado de usuarios mapeados en la base de datos."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings;")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    """Muestra la lista global de managers vinculados."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
-    if not rows:
-        await update.message.reply_text("No hay ningún manager vinculado todavía.")
-        return
+        if not rows:
+            await update.message.reply_text("No hay ningún manager vinculado todavía.")
+            return
 
-    texto = "📋 **Managers Vinculados Globalmente:**\n\n"
-    for f_id, handle in rows:
-        texto += f"• Fleaflicker ID `{f_id}` ➔ {handle}\n"
+        texto = "📋 **Managers Vinculados Globalmente:**\n\n"
+        for f_id, handle in rows:
+            texto += f"• Fleaflicker ID `{f_id}` ➔ {handle}\n"
 
-    await update.message.reply_text(texto, parse_mode="Markdown")
+        await update.message.reply_text(texto, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error en /managers: {e}")
+        await update.message.reply_text("❌ Hubo un error al consultar la base de datos.")
 
 # --- TAREA PROGRAMADA (JOB QUEUE) ---
 
 async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
-    """Tarea periódica que comprueba quién está en el turno (OTC) del Draft."""
+    """Tarea periódica que comprueba el borrador de Fleaflicker."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT chat_id, league_id, commish_handle, user_alert_hours, commish_alert_hours FROM leagues;")
@@ -194,8 +226,7 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
         if not data or "rows" not in data.get("minDraftBoard", {}):
             continue
 
-        # Lógica de detección de pick actual en el Draft
-        # Se verifica si hay un usuario OTC y se calculan los avisos
+        # Lógica de revisión OTC
         pass
 
     cursor.close()
