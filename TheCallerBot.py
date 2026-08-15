@@ -76,11 +76,11 @@ def init_db():
 
 def get_fleaflicker_teams_info(league_id: str):
     """
-    Obtiene todos los equipos de la liga desde Fleaflicker junto con 
-    sus IDs de equipo y datos de propietarios.
+    Obtiene todos los equipos de la liga desde Fleaflicker extrayendo
+    tanto IDs de equipo como IDs de usuario, usernames y nicknames.
     """
     teams_info = []
-    url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
+    url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=nfl&league_id={league_id}"
     
     try:
         res = requests.get(url_rosters, timeout=10)
@@ -95,22 +95,22 @@ def get_fleaflicker_teams_info(league_id: str):
                 if team_id:
                     identifiers.add(team_id)
                 
-                # Propietarios / Owners
+                # Extraer datos de los propietarios
                 for owner in team.get("owners", []):
                     if owner.get("id"):
                         identifiers.add(str(owner.get("id")).strip())
                     if owner.get("displayName"):
-                        identifiers.add(str(owner.get("displayName")).strip())
+                        identifiers.add(str(owner.get("displayName")).strip().lower())
                     if owner.get("username"):
-                        identifiers.add(str(owner.get("username")).strip())
+                        identifiers.add(str(owner.get("username")).strip().lower())
                     
                     user_obj = owner.get("user", {})
                     if user_obj.get("id"):
                         identifiers.add(str(user_obj.get("id")).strip())
                     if user_obj.get("displayName"):
-                        identifiers.add(str(user_obj.get("displayName")).strip())
+                        identifiers.add(str(user_obj.get("displayName")).strip().lower())
                     if user_obj.get("username"):
-                        identifiers.add(str(user_obj.get("username")).strip())
+                        identifiers.add(str(user_obj.get("username")).strip().lower())
 
                 teams_info.append({
                     "team_id": team_id,
@@ -124,10 +124,9 @@ def get_fleaflicker_teams_info(league_id: str):
 
 def resolve_fleaflicker_user_to_team(fleaflicker_input: str, league_id: str):
     """
-    Dado un username o ID de Fleaflicker (ej: 'Las1001' o '2056355'),
-    consulta la API para encontrar el ID y el Nombre de su equipo en la liga actual.
+    Consulta directa a FetchUserRosters con soporte minúsculas para 'sport=nfl'.
     """
-    url_user = f"https://www.fleaflicker.com/api/FetchUserRosters?sport=NFL&username={fleaflicker_input}"
+    url_user = f"https://www.fleaflicker.com/api/FetchUserRosters?sport=nfl&username={fleaflicker_input}"
     try:
         res = requests.get(url_user, timeout=10)
         if res.status_code == 200:
@@ -330,7 +329,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_team_id = None
         detected_team_name = None
 
-        # 1. Buscar coincidencia en los identificadores de los equipos de la liga
+        # 1. Buscar coincidencia insensible a mayúsculas en los identificadores de la liga
         for team in teams:
             for ident in team["identifiers"]:
                 if ident.lower() == fleaflicker_input.lower():
@@ -340,16 +339,20 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if detected_team_name:
                 break
 
-        # 2. Si no coincide con los IDs de equipo, resolver el nombre de usuario en la API de Fleaflicker
+        # 2. Si no coincide localmente, consultar la API de FetchUserRosters
         if not target_team_id:
             res_team_id, res_team_name = resolve_fleaflicker_user_to_team(fleaflicker_input, league_id)
             if res_team_id:
                 target_team_id = res_team_id
                 detected_team_name = res_team_name
 
-        # Usar el ID del equipo como clave primaria de la DB si fue encontrado, o el input ingresado
-        db_key = target_team_id if target_team_id else fleaflicker_input
-        team_display = detected_team_name if detected_team_name else "Sin equipo asignado (Solo Manager/Commish)"
+        # Usar el ID del equipo como clave primaria de la base de datos
+        if target_team_id:
+            db_key = target_team_id
+            team_display = detected_team_name
+        else:
+            db_key = fleaflicker_input
+            team_display = "Sin equipo asignado (Solo Manager/Commish)"
 
         cursor.execute("""
             INSERT INTO user_mappings (fleaflicker_id, team_name, telegram_handle, telegram_id)
@@ -379,7 +382,7 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error al realizar la vinculación: `{e}`", parse_mode="Markdown")
 
 async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra la lista de vinculaciones guardadas haciendo match directo por Team ID."""
+    """Muestra la lista de vinculaciones guardadas haciendo match por Team ID."""
     chat_id = update.effective_chat.id
 
     try:
@@ -411,11 +414,11 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t_id = team["team_id"]
             matched_handle = None
 
-            # 1. Match directo por Team ID (ej. 1810351)
+            # 1. Match por Team ID (ej. 1810351)
             if t_id and t_id.lower() in db_map:
                 _, matched_handle = db_map[t_id.lower()]
 
-            # 2. Match secundario por identificadores de owner si no hubo por Team ID
+            # 2. Match secundario por identificadores
             if not matched_handle:
                 for ident in team["identifiers"]:
                     if ident.lower() in db_map:
