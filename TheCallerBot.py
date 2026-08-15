@@ -80,8 +80,27 @@ def get_fleaflicker_draft_status(league_id: str):
         if response.status_code == 200:
             return response.json()
     except Exception as e:
-        logger.error(f"Error al consultar Fleaflicker: {e}")
+        logger.error(f"Error al consultar Fleaflicker Draft Board: {e}")
     return None
+
+def get_fleaflicker_teams(league_id: str):
+    """Obtiene el mapa {user_id: team_name} desde Fleaflicker."""
+    url = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
+    teams_map = {}
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            for roster in data.get("rosters", []):
+                team = roster.get("team", {})
+                team_name = team.get("name", "Sin Nombre")
+                owners = team.get("owners", [])
+                for owner in owners:
+                    owner_id = str(owner.get("id"))
+                    teams_map[owner_id] = team_name
+    except Exception as e:
+        logger.error(f"Error al obtener equipos de Fleaflicker: {e}")
+    return teams_map
 
 # --- HANDLERS DE COMANDOS ---
 
@@ -94,7 +113,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/vincular <id_fleaflicker> <@nick>` - Vincular a otro manager\n"
         "• `/setLeague <league_id> <commish>` - Configurar la liga de este chat\n"
         "• `/setAlerts <h_user> <h_commish>` - Configurar avisos\n"
-        "• `/managers` - Ver los vinculados globalmente",
+        "• `/managers` - Ver los equipos y managers vinculados",
         parse_mode="Markdown"
     )
 
@@ -201,27 +220,52 @@ async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Hubo un error al guardar la vinculación en la base de datos.")
 
 async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra la lista global de managers vinculados."""
+    """Muestra el listado de los equipos de la liga actual cruzados con los managers vinculados."""
+    chat_id = update.effective_chat.id
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # 1. Obtener la liga configurada para este chat
+        cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
+        league_row = cursor.fetchone()
+        
+        # 2. Obtener los mapeos globales de la BD
         cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings;")
-        rows = cursor.fetchall()
+        mappings = dict(cursor.fetchall())  # { "id_fleaflicker": "@nick" }
+        
         cursor.close()
         conn.close()
 
-        if not rows:
-            await update.message.reply_text("No hay ningún manager vinculado todavía.")
+        if not league_row:
+            await update.message.reply_text("⚠️ Primero debes configurar la liga en este chat usando `/setLeague <league_id> <@comisionado>`", parse_mode="Markdown")
             return
 
-        texto = "📋 **Managers Vinculados Globalmente:**\n\n"
-        for f_id, handle in rows:
-            texto += f"• Fleaflicker ID `{f_id}` ➔ {handle}\n"
+        league_id = league_row[0]
+
+        # 3. Traer los equipos directamente de la API de Fleaflicker
+        teams_map = get_fleaflicker_teams(league_id)
+
+        if not teams_map:
+            await update.message.reply_text("⚠️ No se pudieron obtener los equipos desde Fleaflicker. Revisa si el `league_id` es correcto.")
+            return
+
+        texto = "📋 **Estado de Managers en la Liga**\n\n"
+        
+        # 4. Construir la lista mostrando Equipo ➔ Telegram Nick
+        for f_id, team_name in teams_map.items():
+            handle = mappings.get(f_id)
+            if handle:
+                texto += f"🏈 **{team_name}**\n└ 👤 {handle} (`{f_id}`)\n\n"
+            else:
+                texto += f"🏈 **{team_name}**\n└ ❌ *Sin vincular* (`{f_id}`)\n\n"
 
         await update.message.reply_text(texto, parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"Error en /managers: {e}")
-        await update.message.reply_text("❌ Hubo un error al consultar la base de datos.")
+        await update.message.reply_text("❌ Hubo un error al obtener la lista de managers.")
 
 # --- TAREA PROGRAMADA (JOB QUEUE) ---
 
