@@ -107,43 +107,76 @@ def parse_team_data(team_obj):
 
 def get_fleaflicker_teams_info(league_id: str):
     """
-    Obtiene los equipos de la liga desde Fleaflicker.
-    Si la liga está drafteando, recurre a FetchLeagueDraftBoard.
+    Obtiene los equipos de la liga desde Fleaflicker probando tres endpoints distintos:
+    1. FetchLeagueRosters
+    2. FetchLeagueDraftBoard (para ligas drafteando)
+    3. FetchLeagueStandings (fallback general con season explícito)
     """
     teams_dict = {}
+    current_year = datetime.now(timezone.utc).year
 
-    # 1. Intentar vía FetchLeagueRosters
-    url_rosters = f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=nfl&league_id={league_id}"
-    try:
-        res = requests.get(url_rosters, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            for roster in data.get("rosters", []):
-                team = roster.get("team", {})
-                parsed = parse_team_data(team)
-                if parsed["team_id"]:
-                    teams_dict[parsed["team_id"]] = parsed
-    except Exception as e:
-        logger.error(f"Error en FetchLeagueRosters: {e}")
-
-    # 2. Si no devolvió rosters (por estar en Draft activo), consultar FetchLeagueDraftBoard
-    if not teams_dict:
-        url_draft = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}"
+    # 1. Probar FetchLeagueRosters (con y sin temporada)
+    urls_rosters = [
+        f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=nfl&league_id={league_id}&season={current_year}",
+        f"https://www.fleaflicker.com/api/FetchLeagueRosters?sport=NFL&league_id={league_id}"
+    ]
+    for url in urls_rosters:
         try:
-            res = requests.get(url_draft, timeout=10)
+            res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                # Extraer equipos desde el orden de las rondas del draft
-                rows = data.get("rows", [])
-                for row in rows:
+                for roster in data.get("rosters", []):
+                    team = roster.get("team", {})
+                    parsed = parse_team_data(team)
+                    if parsed["team_id"]:
+                        teams_dict[parsed["team_id"]] = parsed
+                if teams_dict:
+                    return list(teams_dict.values())
+        except Exception as e:
+            logger.error(f"Error en FetchLeagueRosters ({url}): {e}")
+
+    # 2. Probar FetchLeagueDraftBoard si la liga está drafteando
+    urls_draft = [
+        f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}",
+        f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=NFL&league_id={league_id}"
+    ]
+    for url in urls_draft:
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                for row in data.get("rows", []):
                     for cell in row.get("cells", []):
                         team = cell.get("team", {})
                         if team and team.get("id"):
                             parsed = parse_team_data(team)
                             if parsed["team_id"] not in teams_dict:
                                 teams_dict[parsed["team_id"]] = parsed
+                if teams_dict:
+                    return list(teams_dict.values())
         except Exception as e:
-            logger.error(f"Error en FetchLeagueDraftBoard: {e}")
+            logger.error(f"Error en FetchLeagueDraftBoard ({url}): {e}")
+
+    # 3. Fallback a FetchLeagueStandings
+    urls_standings = [
+        f"https://www.fleaflicker.com/api/FetchLeagueStandings?sport=nfl&league_id={league_id}&season={current_year}",
+        f"https://www.fleaflicker.com/api/FetchLeagueStandings?sport=NFL&league_id={league_id}"
+    ]
+    for url in urls_standings:
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                divisions = data.get("divisions", [])
+                for div in divisions:
+                    for team in div.get("teams", []):
+                        parsed = parse_team_data(team)
+                        if parsed["team_id"]:
+                            teams_dict[parsed["team_id"]] = parsed
+                if teams_dict:
+                    return list(teams_dict.values())
+        except Exception as e:
+            logger.error(f"Error en FetchLeagueStandings ({url}): {e}")
 
     return list(teams_dict.values())
 
