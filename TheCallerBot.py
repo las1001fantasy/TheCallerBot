@@ -27,7 +27,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Inicializa la estructura de tablas si no existen."""
+    """Inicializa la estructura de tablas en PostgreSQL si no existen."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -46,7 +46,7 @@ def init_db():
             PRIMARY KEY (chat_id, platform_user_id)
         );
         CREATE TABLE IF NOT EXISTS draft_state (
-            chat_id BIGINT PRIMARY KEY REFERENCES leagues(chat_id) ON DELETE CASCADE,
+            chat_id BIGINT REFERENCES leagues(chat_id) ON DELETE CASCADE,
             current_pick_overall INT,
             otc_user_id VARCHAR(100),
             otc_start_time TIMESTAMP WITH TIME ZONE,
@@ -74,7 +74,6 @@ def get_fleaflicker_otc(league_id):
                     team = item.get("team", {})
                     user = team.get("owners", [{}])[0]
                     user_id = str(user.get("id", ""))
-                    # El tiempo de inicio se calcula del pick o marca actual
                     return {
                         "pick_overall": item.get("overall"),
                         "user_id": user_id,
@@ -115,7 +114,7 @@ async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.close()
     conn.close()
 
-    await update.message.reply_text(f"✅ Liga configurada:\n• Plataforma: {platform}\n• ID Liga: {league_id}\n• Commish: {commish}")
+    await update.message.reply_text(f"✅ Liga configurada:\n• Plataforma: {platform}\n• ID Liga: `{league_id}`\n• Commish: {commish}", parse_mode="Markdown")
 
 async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sintaxis: /setAlerts <horas_user> <horas_commish>"""
@@ -142,14 +141,28 @@ async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏱ Alertas actualizadas: Manager a las {user_h}h / Commish a las {commish_h}h.")
 
 async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sintaxis: /vincular <fleaflicker_user_id>"""
+    """Sintaxis:
+    - Autovincularse: /vincular <fleaflicker_user_id>
+    - Vincular a otro: /vincular <fleaflicker_user_id> <@telegram_handle>
+    """
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("⚠️ Uso: `/vincular <fleaflicker_user_id>`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "⚠️ Uso:\n"
+            "• Tu usuario: `/vincular <id_fleaflicker>`\n"
+            "• Otro manager: `/vincular <id_fleaflicker> <@telegram_user>`",
+            parse_mode="Markdown"
+        )
         return
 
     platform_id = args[0]
-    tg_handle = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
+    
+    # Toma el segundo parámetro si existe; si no, toma el usuario actual
+    if len(args) >= 2:
+        tg_handle = args[1] if args[1].startswith("@") else f"@{args[1]}"
+    else:
+        tg_handle = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
+
     chat_id = update.effective_chat.id
 
     conn = get_db_connection()
@@ -207,12 +220,12 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
         pick = otc_info["pick_overall"]
         user_id = otc_info["user_id"]
 
-        # Consultar estado previo del draft en DB
+        # Consultar estado previo en DB
         cursor.execute("SELECT current_pick_overall, otc_user_id, otc_start_time, user_alert_sent, commish_alert_sent FROM draft_state WHERE chat_id = %s", (chat_id,))
         state = cursor.fetchone()
 
         if not state or state[0] != pick or state[1] != user_id:
-            # Nuevo pick/turno detectado: reiniciamos temporizador en DB
+            # Nuevo pick/turno detectado
             cursor.execute("""
                 INSERT INTO draft_state (chat_id, current_pick_overall, otc_user_id, otc_start_time, user_alert_sent, commish_alert_sent)
                 VALUES (%s, %s, %s, %s, FALSE, FALSE)
@@ -225,7 +238,6 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
             """, (chat_id, pick, user_id, now))
             conn.commit()
 
-            # Obtener nick de Telegram mapeado
             cursor.execute("SELECT telegram_handle FROM user_mappings WHERE chat_id = %s AND platform_user_id = %s", (chat_id, user_id))
             mapping = cursor.fetchone()
             tg_mention = mapping[0] if mapping else otc_info["user_name"]
@@ -236,7 +248,7 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
-            # Pick en curso: comprobar si ha sobrepasado los tiempos límite
+            # Comprobar tiempos transcurridos en el mismo pick
             otc_start = state[2]
             user_alert_sent = state[3]
             commish_alert_sent = state[4]
@@ -247,7 +259,7 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
             mapping = cursor.fetchone()
             tg_mention = mapping[0] if mapping else otc_info["user_name"]
 
-            # Alerta al Usuario (por defecto 2h)
+            # Primer aviso al usuario (2h por defecto)
             if elapsed_hours >= u_hours and not user_alert_sent:
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -257,7 +269,7 @@ async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("UPDATE draft_state SET user_alert_sent = TRUE WHERE chat_id = %s", (chat_id,))
                 conn.commit()
 
-            # Alerta al Comisionado (por defecto 8h)
+            # Aviso al Comisionado (8h por defecto)
             if elapsed_hours >= c_hours and not commish_alert_sent:
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -276,17 +288,16 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Manejadores de comandos
     app.add_handler(CommandHandler("setLeague", set_league))
     app.add_handler(CommandHandler("setAlerts", set_alerts))
     app.add_handler(CommandHandler("vincular", vincular))
     app.add_handler(CommandHandler("managers", list_managers))
 
-    # Programar verificación en segundo plano (cada 90 segundos)
+    # Revisa Fleaflicker cada 90 segundos
     if app.job_queue:
         app.job_queue.run_repeating(check_otc_job, interval=90, first=10)
 
-    logger.info("Bot iniciado...")
+    logger.info("Bot iniciado correctamente...")
     app.run_polling()
 
 if __name__ == "__main__":
