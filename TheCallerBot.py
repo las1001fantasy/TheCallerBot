@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 import requests
-import psycopg2
+import psycopg
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
@@ -24,7 +24,7 @@ if not BOT_TOKEN or not DATABASE_URL:
     sys.exit(1)
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL)
 
 def init_db():
     """Inicializa la estructura de tablas en PostgreSQL si no existen."""
