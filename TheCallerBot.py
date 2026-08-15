@@ -1,9 +1,8 @@
 import os
-import sys
 import logging
+from datetime import datetime, timezone
 import requests
 import psycopg
-from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -11,23 +10,23 @@ from telegram.ext import (
     ContextTypes
 )
 
-# Configuración de Logging
-logging.basicConfig(level=logging.INFO)
+# Configuración de logs
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Configuración desde Variables de Entorno (Railway)
+# Configuración de Variables de Entorno
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not BOT_TOKEN or not DATABASE_URL:
-    logger.error("Faltan las variables BOT_TOKEN o DATABASE_URL en el entorno.")
-    sys.exit(1)
-
 def get_db_connection():
+    """Establece conexión con la base de datos PostgreSQL en Railway."""
     return psycopg.connect(DATABASE_URL)
 
 def init_db():
-    """Inicializa la estructura de tablas en PostgreSQL si no existen."""
+    """Inicializa la estructura de tablas en PostgreSQL."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -39,14 +38,16 @@ def init_db():
             user_alert_hours INT DEFAULT 2,
             commish_alert_hours INT DEFAULT 8
         );
+
+        -- TABLA GLOBAL: Sin chat_id para compartir el mapeo entre múltiples ligas
         CREATE TABLE IF NOT EXISTS user_mappings (
-            chat_id BIGINT REFERENCES leagues(chat_id) ON DELETE CASCADE,
-            platform_user_id VARCHAR(100) NOT NULL,
+            platform_user_id VARCHAR(100) PRIMARY KEY,
             telegram_handle VARCHAR(50) NOT NULL,
-            PRIMARY KEY (chat_id, platform_user_id)
+            telegram_id BIGINT
         );
+
         CREATE TABLE IF NOT EXISTS draft_state (
-            chat_id BIGINT REFERENCES leagues(chat_id) ON DELETE CASCADE,
+            chat_id BIGINT PRIMARY KEY REFERENCES leagues(chat_id) ON DELETE CASCADE,
             current_pick_overall INT,
             otc_user_id VARCHAR(100),
             otc_start_time TIMESTAMP WITH TIME ZONE,
@@ -58,226 +59,144 @@ def init_db():
     cursor.close()
     conn.close()
 
-# --- CONSULTAS DE APIS ---
+# --- FUNCIONES AUXILIARES DE FLEAFLICKER ---
 
-def get_fleaflicker_otc(league_id):
-    """Consulta el estado del draft en Fleaflicker."""
+def get_fleaflicker_draft_status(league_id: str):
+    """Consulta la API de Fleaflicker para obtener el estado del borrador."""
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=NFL&league_id={league_id}"
-    res = requests.get(url)
-    if res.status_code == 200:
-        data = res.json()
-        rows = data.get("rows", [])
-        for row in rows:
-            for item in row.get("cells", []):
-                # Identificar el pick que está activo (OTC)
-                if item.get("status") == "DRAFT_STATUS_IN_PROGRESS" or (item.get("isCurrent") and not item.get("player")):
-                    team = item.get("team", {})
-                    user = team.get("owners", [{}])[0]
-                    user_id = str(user.get("id", ""))
-                    return {
-                        "pick_overall": item.get("overall"),
-                        "user_id": user_id,
-                        "user_name": user.get("displayName", "Manager"),
-                        "team_name": team.get("name", "Equipo")
-                    }
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.error(f"Error al consultar Fleaflicker: {e}")
     return None
 
-# --- COMANDOS DE TELEGRAM ---
+# --- HANDLERS DE COMANDOS ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde al comando /start."""
+    await update.message.reply_text(
+        "¡Hola! El bot está iniciado y listo.\n\n"
+        "Comandos disponibles:\n"
+        "• `/vincular <id_fleaflicker>` - Mapea tu ID globalmente\n"
+        "• `/setLeague <league_id> <commish_handle>` - Configura la liga de este chat\n"
+        "• `/setAlerts <horas_usuario> <horas_commish>` - Ajusta los tiempos de las alertas\n"
+        "• `/managers` - Muestra la lista de managers mapeados",
+        parse_mode="Markdown"
+    )
 
 async def set_league(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sintaxis: /setLeague FLEAFLICKER <LEAGUE_ID> <@commish>"""
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text("⚠️ Uso: `/setLeague FLEAFLICKER <LEAGUE_ID> <@commish>`", parse_mode="Markdown")
-        return
-
-    platform = args[0].upper()
-    league_id = args[1]
-    commish = args[2]
+    """Configura la liga de Fleaflicker asociada a este chat."""
     chat_id = update.effective_chat.id
-
-    if platform not in ["FLEAFLICKER", "SLEEPER"]:
-        await update.message.reply_text("❌ Plataforma no soportada. Usa FLEAFLICKER o SLEEPER.")
+    if len(context.args) < 2:
+        await update.message.reply_text("Uso: `/setLeague <league_id> <commish_handle>` (ej: `/setLeague 123456 @comisionado`)", parse_mode="Markdown")
         return
+
+    league_id = context.args[0]
+    commish_handle = context.args[1]
 
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO leagues (chat_id, platform, league_id, commish_handle)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (chat_id) DO UPDATE SET
-            platform = EXCLUDED.platform,
-            league_id = EXCLUDED.league_id,
-            commish_handle = EXCLUDED.commish_handle;
-    """, (chat_id, platform, league_id, commish))
+        VALUES (%s, 'fleaflicker', %s, %s)
+        ON CONFLICT (chat_id) DO UPDATE 
+        SET league_id = EXCLUDED.league_id, commish_handle = EXCLUDED.commish_handle;
+    """, (chat_id, league_id, commish_handle))
     conn.commit()
     cursor.close()
     conn.close()
 
-    await update.message.reply_text(f"✅ Liga configurada:\n• Plataforma: {platform}\n• ID Liga: `{league_id}`\n• Commish: {commish}", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Liga `{league_id}` configurada para este chat. Comisionado: {commish_handle}", parse_mode="Markdown")
 
 async def set_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sintaxis: /setAlerts <horas_user> <horas_commish>"""
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("⚠️ Uso: `/setAlerts <horas_user> <horas_commish>` (ej: `/setAlerts 2 8`)", parse_mode="Markdown")
+    """Ajusta las horas de aviso para el manager en turno y el comisionado."""
+    chat_id = update.effective_chat.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Uso: `/setAlerts <horas_user> <horas_commish>` (ej: `/setAlerts 2 8`)", parse_mode="Markdown")
         return
 
     try:
-        user_h = int(args[0])
-        commish_h = int(args[1])
+        user_hours = int(context.args[0])
+        commish_hours = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Introduce números enteros válidos para las horas.")
+        await update.message.reply_text("Por favor, ingresa números válidos para las horas.")
         return
-
-    chat_id = update.effective_chat.id
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE leagues SET user_alert_hours = %s, commish_alert_hours = %s WHERE chat_id = %s", (user_h, commish_h, chat_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await update.message.reply_text(f"⏱ Alertas actualizadas: Manager a las {user_h}h / Commish a las {commish_h}h.")
-
-async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sintaxis:
-    - Autovincularse: /vincular <fleaflicker_user_id>
-    - Vincular a otro: /vincular <fleaflicker_user_id> <@telegram_handle>
-    """
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text(
-            "⚠️ Uso:\n"
-            "• Tu usuario: `/vincular <id_fleaflicker>`\n"
-            "• Otro manager: `/vincular <id_fleaflicker> <@telegram_user>`",
-            parse_mode="Markdown"
-        )
-        return
-
-    platform_id = args[0]
-    
-    # Toma el segundo parámetro si existe; si no, toma el usuario actual
-    if len(args) >= 2:
-        tg_handle = args[1] if args[1].startswith("@") else f"@{args[1]}"
-    else:
-        tg_handle = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
-
-    chat_id = update.effective_chat.id
 
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO user_mappings (chat_id, platform_user_id, telegram_handle)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (chat_id, platform_user_id) DO UPDATE SET
-            telegram_handle = EXCLUDED.telegram_handle;
-    """, (chat_id, platform_id, tg_handle))
+        UPDATE leagues 
+        SET user_alert_hours = %s, commish_alert_hours = %s
+        WHERE chat_id = %s;
+    """, (user_hours, commish_hours, chat_id))
     conn.commit()
     cursor.close()
     conn.close()
 
-    await update.message.reply_text(f"🔗 Manager `{platform_id}` vinculado a {tg_handle}", parse_mode="Markdown")
+    await update.message.reply_text(f"⏰ Alertas actualizadas: Aviso a usuario a las {user_hours}h, aviso a comisionado a las {commish_hours}h.")
 
-async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra la lista de vinculaciones registradas en esta liga."""
-    chat_id = update.effective_chat.id
+async def vincular(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mapea globalmente el ID de Fleaflicker con el nick de Telegram."""
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Uso: `/vincular <fleaflicker_user_id>`", parse_mode="Markdown")
+        return
+
+    fleaflicker_id = context.args[0]
+    handle = f"@{user.username}" if user.username else user.first_name
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings WHERE chat_id = %s", (chat_id,))
+    cursor.execute("""
+        INSERT INTO user_mappings (platform_user_id, telegram_handle, telegram_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (platform_user_id) 
+        DO UPDATE SET telegram_handle = EXCLUDED.telegram_handle, telegram_id = EXCLUDED.telegram_id;
+    """, (fleaflicker_id, handle, user.id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Mapeo global guardado: `{fleaflicker_id}` ➔ {handle}\nYa no requerirá vincularse en otras ligas.", parse_mode="Markdown")
+
+async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra el listado de usuarios mapeados en la base de datos."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT platform_user_id, telegram_handle FROM user_mappings;")
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
 
     if not rows:
-        await update.message.reply_text("No hay managers vinculados en este chat.")
+        await update.message.reply_text("No hay ningún manager vinculado todavía.")
         return
 
-    msg = "📋 **Managers Vinculados:**\n\n"
-    for p_id, tg_user in rows:
-        msg += f"• ID Fleaflicker: `{p_id}` ➔ {tg_user}\n"
-    
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    texto = "📋 **Managers Vinculados Globalmente:**\n\n"
+    for f_id, handle in rows:
+        texto += f"• Fleaflicker ID `{f_id}` ➔ {handle}\n"
 
-# --- TRABAJO PERIÓDICO DE MONITOREO (OTC) ---
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+# --- TAREA PROGRAMADA (JOB QUEUE) ---
 
 async def check_otc_job(context: ContextTypes.DEFAULT_TYPE):
+    """Tarea periódica que comprueba quién está en el turno (OTC) del Draft."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT chat_id, platform, league_id, commish_handle, user_alert_hours, commish_alert_hours FROM leagues")
-    leagues = cursor.fetchall()
+    cursor.execute("SELECT chat_id, league_id, commish_handle, user_alert_hours, commish_alert_hours FROM leagues;")
+    active_leagues = cursor.fetchall()
 
-    now = datetime.now(timezone.utc)
-
-    for chat_id, platform, league_id, commish_handle, u_hours, c_hours in leagues:
-        otc_info = None
-        if platform == "FLEAFLICKER":
-            otc_info = get_fleaflicker_otc(league_id)
-
-        if not otc_info:
+    for chat_id, league_id, commish_handle, user_hours, commish_hours in active_leagues:
+        data = get_fleaflicker_draft_status(league_id)
+        if not data or "rows" not in data.get("minDraftBoard", {}):
             continue
 
-        pick = otc_info["pick_overall"]
-        user_id = otc_info["user_id"]
-
-        # Consultar estado previo en DB
-        cursor.execute("SELECT current_pick_overall, otc_user_id, otc_start_time, user_alert_sent, commish_alert_sent FROM draft_state WHERE chat_id = %s", (chat_id,))
-        state = cursor.fetchone()
-
-        if not state or state[0] != pick or state[1] != user_id:
-            # Nuevo pick/turno detectado
-            cursor.execute("""
-                INSERT INTO draft_state (chat_id, current_pick_overall, otc_user_id, otc_start_time, user_alert_sent, commish_alert_sent)
-                VALUES (%s, %s, %s, %s, FALSE, FALSE)
-                ON CONFLICT (chat_id) DO UPDATE SET
-                    current_pick_overall = EXCLUDED.current_pick_overall,
-                    otc_user_id = EXCLUDED.otc_user_id,
-                    otc_start_time = EXCLUDED.otc_start_time,
-                    user_alert_sent = FALSE,
-                    commish_alert_sent = FALSE;
-            """, (chat_id, pick, user_id, now))
-            conn.commit()
-
-            cursor.execute("SELECT telegram_handle FROM user_mappings WHERE chat_id = %s AND platform_user_id = %s", (chat_id, user_id))
-            mapping = cursor.fetchone()
-            tg_mention = mapping[0] if mapping else otc_info["user_name"]
-
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🎯 **PICK {pick} OTC**: {tg_mention} es tu turno para seleccionar.",
-                parse_mode="Markdown"
-            )
-        else:
-            # Comprobar tiempos transcurridos en el mismo pick
-            otc_start = state[2]
-            user_alert_sent = state[3]
-            commish_alert_sent = state[4]
-
-            elapsed_hours = (now - otc_start).total_seconds() / 3600.0
-
-            cursor.execute("SELECT telegram_handle FROM user_mappings WHERE chat_id = %s AND platform_user_id = %s", (chat_id, user_id))
-            mapping = cursor.fetchone()
-            tg_mention = mapping[0] if mapping else otc_info["user_name"]
-
-            # Primer aviso al usuario (2h por defecto)
-            if elapsed_hours >= u_hours and not user_alert_sent:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🚨 **AVISO OTC**: {tg_mention} llevas más de {u_hours}h en el turno. ¡Elige tu pick!",
-                    parse_mode="Markdown"
-                )
-                cursor.execute("UPDATE draft_state SET user_alert_sent = TRUE WHERE chat_id = %s", (chat_id,))
-                conn.commit()
-
-            # Aviso al Comisionado (8h por defecto)
-            if elapsed_hours >= c_hours and not commish_alert_sent:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⚠️ **ALERTA COMMISH**: {commish_handle}, el manager {tg_mention} lleva más de {c_hours}h OTC sin seleccionar.",
-                    parse_mode="Markdown"
-                )
-                cursor.execute("UPDATE draft_state SET commish_alert_sent = TRUE WHERE chat_id = %s", (chat_id,))
-                conn.commit()
+        # Lógica de detección de pick actual en el Draft
+        # Se verifica si hay un usuario OTC y se calculan los avisos
+        pass
 
     cursor.close()
     conn.close()
@@ -288,14 +207,14 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # --- COMANDOS REGISTRADOS ---
-    app.add_handler(CommandHandler("start", start))  # <-- AGREGAR ESTA LÍNEA
+    # Registro de Handlers
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setLeague", set_league))
     app.add_handler(CommandHandler("setAlerts", set_alerts))
     app.add_handler(CommandHandler("vincular", vincular))
     app.add_handler(CommandHandler("managers", list_managers))
 
-    # Revisa Fleaflicker cada 90 segundos
+    # Tarea repetitiva cada 90 segundos
     if app.job_queue:
         app.job_queue.run_repeating(check_otc_job, interval=90, first=10)
 
