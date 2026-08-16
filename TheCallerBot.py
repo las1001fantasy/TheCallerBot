@@ -141,25 +141,42 @@ def get_fleaflicker_teams_info(league_id: str):
     return list(teams_dict.values())
 
 def get_current_otc_data(league_id: str):
-    """Consulta el borrador del draft en Fleaflicker para determinar el pick activo y quién está OTC."""
+    """Obtiene el pick activo inspeccionando los picks sin jugador de Fleaflicker."""
     current_year = datetime.now(timezone.utc).year
-    url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
+    
+    urls = [
+        f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}",
+        f"https://www.fleaflicker.com/api/FetchLeagueDraftPayload?sport=nfl&league_id={league_id}&season={current_year}"
+    ]
 
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            rows = data.get("rows", [])
-            
-            for row in rows:
-                for cell in row.get("cells", []):
-                    # Si la celda no tiene jugador seleccionado pero tiene equipo, ese es el pick activo
-                    if not cell.get("player") and cell.get("team"):
-                        team_info = parse_team_data(cell.get("team"))
-                        pick_overall = cell.get("overall") or (cell.get("round", 1) * cell.get("slot", 1))
-                        round_num = cell.get("round")
-                        slot_num = cell.get("slot")
+    for url in urls:
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                
+                # 1. Buscar en la lista plana de picks (si existe)
+                picks = data.get("picks", [])
+                
+                # Si no está en 'picks', buscar dentro de 'rows' -> 'cells'
+                if not picks:
+                    for row in data.get("rows", []):
+                        for cell in row.get("cells", []):
+                            picks.append(cell)
+
+                # Buscar el PRIMER pick que NO tenga jugador asignado
+                for pick in picks:
+                    has_player = bool(pick.get("player") or pick.get("playerInfo"))
+                    team = pick.get("team")
+
+                    if not has_player and team:
+                        team_info = parse_team_data(team)
                         
+                        # Extraer número de pick/ronda/slot
+                        pick_overall = pick.get("overall") or pick.get("pick") or 1
+                        round_num = pick.get("round") or 1
+                        slot_num = pick.get("slot") or pick.get("roundSlot") or 1
+
                         return {
                             "team_id": team_info["team_id"],
                             "team_name": team_info["team_name"],
@@ -168,8 +185,8 @@ def get_current_otc_data(league_id: str):
                             "slot": slot_num,
                             "identifiers": team_info["identifiers"]
                         }
-    except Exception as e:
-        logger.error(f"Error en FetchLeagueDraftBoard: {e}")
+        except Exception as e:
+            logger.error(f"Error consultando draft en url {url}: {e}")
 
     return None
 
@@ -223,7 +240,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 **No hay ningún pick activo en este momento.** (El draft puede estar pausado o finalizado).")
+            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b> (El draft puede estar pausado o finalizado).", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
