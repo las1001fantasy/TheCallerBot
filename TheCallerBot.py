@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 from datetime import datetime, timezone
 import html
 import requests
@@ -132,26 +131,48 @@ def get_fleaflicker_teams_info(league_id: str):
     return list(teams_dict.values())
 
 def get_current_otc_data(league_id: str):
-    """Diagnóstico directo por logs del JSON retornado por Fleaflicker."""
+    """
+    Parsea de forma precisa la estructura 'rows' -> 'cells' extraída de los logs.
+    """
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
 
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            
-            logger.info(f"--- FLEAFLICKER KEYS: {list(data.keys())} ---")
+        if res.status_code != 200:
+            return None
 
-            if "rows" in data and len(data["rows"]) > 0:
-                logger.info(f"--- MUESTRA ROW 0: {data['rows'][0]} ---")
-            elif "picks" in data and len(data["picks"]) > 0:
-                logger.info(f"--- MUESTRA PICK 0: {data['picks'][0]} ---")
-            else:
-                logger.info(f"--- JSON COMPLETO: {data} ---")
+        data = res.json()
+        rows = data.get("rows", [])
+
+        for round_index, row in enumerate(rows, start=1):
+            cells = row.get("cells", [])
+            for slot_index, cell in enumerate(cells, start=1):
+                # Si executed es False o no existe, o si no hay un jugador asignado
+                is_executed = cell.get("executed", False)
+                has_player = bool(cell.get("player"))
+
+                if not is_executed and not has_player:
+                    team_obj = cell.get("claimTeam") or cell.get("team")
+                    
+                    # Si no hay objeto directo de equipo, buscar en el roster
+                    if not team_obj and "roster" in cell:
+                        team_obj = cell["roster"].get("team")
+
+                    team_info = parse_team_data(team_obj)
+                    pick_overall = cell.get("overall") or ((round_index - 1) * len(cells) + slot_index)
+
+                    return {
+                        "team_id": team_info["team_id"],
+                        "team_name": team_info["team_name"],
+                        "pick_overall": pick_overall,
+                        "round": round_index,
+                        "slot": slot_index,
+                        "identifiers": team_info["identifiers"]
+                    }
 
     except Exception as e:
-        logger.error(f"Error en debug de Fleaflicker: {e}")
+        logger.error(f"Error parseando draft board de Fleaflicker: {e}")
 
     return None
 
@@ -205,7 +226,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 <b>Inspección enviada a los logs.</b> Revisa la consola del servidor.", parse_mode="HTML")
+            await update.message.reply_text("🏈 <b>No se encontró turno activo.</b>\n(El draft podría estar completado o pausado).", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
