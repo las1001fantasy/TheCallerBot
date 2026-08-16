@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 from datetime import datetime, timezone
 import html
 import requests
@@ -71,13 +72,13 @@ def init_db():
 # --- AUXILIARES FLEAFLICKER ---
 
 def parse_team_data(team_obj):
+    if not team_obj:
+        return {"team_id": None, "team_name": "Sin Equipo", "identifiers": []}
+
     team_id = str(team_obj.get("id")).strip() if team_obj.get("id") else None
     team_name = team_obj.get("name") or team_obj.get("nickname") or "Equipo sin nombre"
     
-    user_id = None
-    username = None
     identifiers = set()
-
     if team_id:
         identifiers.add(team_id)
     if team_name:
@@ -85,30 +86,20 @@ def parse_team_data(team_obj):
 
     for owner in team_obj.get("owners", []):
         if owner.get("id"):
-            u_id = str(owner.get("id")).strip()
-            user_id = user_id or u_id
-            identifiers.add(u_id)
+            identifiers.add(str(owner.get("id")).strip())
         if owner.get("username"):
-            u_name = str(owner.get("username")).strip()
-            username = username or u_name
-            identifiers.add(u_name.lower())
+            identifiers.add(str(owner.get("username")).strip().lower())
 
         user_obj = owner.get("user", {})
         if user_obj:
             if user_obj.get("id"):
-                u_id = str(user_obj.get("id")).strip()
-                user_id = user_id or u_id
-                identifiers.add(u_id)
+                identifiers.add(str(user_obj.get("id")).strip())
             if user_obj.get("username"):
-                u_name = str(user_obj.get("username")).strip()
-                username = username or u_name
-                identifiers.add(u_name.lower())
+                identifiers.add(str(user_obj.get("username")).strip().lower())
 
     return {
         "team_id": team_id,
         "team_name": team_name,
-        "user_id": user_id or "Sin ID",
-        "username": username or "Sin Username",
         "identifiers": [i for i in identifiers if i]
     }
 
@@ -140,71 +131,68 @@ def get_fleaflicker_teams_info(league_id: str):
 
     return list(teams_dict.values())
 
-def get_current_otc_data(league_id: str):
-    """Obtiene el pick activo inspeccionando recursivamente el JSON de Fleaflicker."""
-    current_year = datetime.now(timezone.utc).year
+def is_player_assigned(cell):
+    """Determina estrictamente si un pick ya tiene un jugador drafteado."""
+    player_obj = cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer")
+    if not player_obj:
+        return False
     
-    urls = [
-        f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}",
-        f"https://www.fleaflicker.com/api/FetchLeagueDraftPayload?sport=nfl&league_id={league_id}&season={current_year}"
-    ]
+    # Si existe el objeto 'proPlayer' o 'player', verificar si tiene ID válido
+    if isinstance(player_obj, dict):
+        p_info = player_obj.get("proPlayer") or player_obj.get("player") or player_obj
+        if p_info.get("id"):
+            return True
 
-    for url in urls:
-        try:
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                
-                # Extraer celdas/picks desde cualquier estructura del JSON
-                all_cells = []
-                
-                if "picks" in data and isinstance(data["picks"], list):
-                    all_cells.extend(data["picks"])
+    return False
+
+def get_current_otc_data(league_id: str):
+    """Obtiene el pick activo inspeccionando las celdas del borrador de Fleaflicker."""
+    current_year = datetime.now(timezone.utc).year
+    url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
+
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            
+            all_cells = []
+            if "rows" in data and isinstance(data["rows"], list):
+                for row in data["rows"]:
+                    cells = row.get("cells", [])
+                    all_cells.extend(cells)
+
+            if "picks" in data and isinstance(data["picks"], list):
+                all_cells.extend(data["picks"])
+
+            # Iterar por todas las selecciones
+            for idx, cell in enumerate(all_cells):
+                team_obj = cell.get("team") or cell.get("claimTeam")
+                if not team_obj and "roster" in cell:
+                    team_obj = cell["roster"].get("team")
+
+                # Si la celda no tiene equipo asignado, la ignoramos
+                if not team_obj:
+                    continue
+
+                # Si NO tiene jugador asignado, este es el pick OTC
+                if not is_player_assigned(cell):
+                    team_info = parse_team_data(team_obj)
                     
-                if "rows" in data and isinstance(data["rows"], list):
-                    for row in data["rows"]:
-                        cells = row.get("cells", [])
-                        all_cells.extend(cells)
+                    round_num = cell.get("round") or 1
+                    slot_num = cell.get("slot") or 1
+                    pick_overall = cell.get("overall") or (idx + 1)
 
-                if "orderedPicks" in data and isinstance(data["orderedPicks"], list):
-                    all_cells.extend(data["orderedPicks"])
+                    return {
+                        "team_id": team_info["team_id"],
+                        "team_name": team_info["team_name"],
+                        "pick_overall": pick_overall,
+                        "round": round_num,
+                        "slot": slot_num,
+                        "identifiers": team_info["identifiers"]
+                    }
 
-                # Analizar de forma secuencial
-                for idx, cell in enumerate(all_cells):
-                    team_obj = cell.get("team") or cell.get("claimTeam")
-                    
-                    if not team_obj and "roster" in cell:
-                        team_obj = cell["roster"].get("team")
-
-                    if not team_obj:
-                        continue
-
-                    # Verificar si YA tiene un jugador seleccionado
-                    has_player = False
-                    if cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer"):
-                        has_player = True
-                    elif cell.get("isExecuted") is True:
-                        has_player = True
-
-                    # El primer elemento sin jugador asignado es el OTC actual
-                    if not has_player:
-                        team_info = parse_team_data(team_obj)
-                        
-                        round_num = cell.get("round") or cell.get("roundNum") or 1
-                        slot_num = cell.get("slot") or cell.get("slotNum") or 1
-                        pick_overall = cell.get("overall") or cell.get("overallPick") or (idx + 1)
-
-                        return {
-                            "team_id": team_info["team_id"],
-                            "team_name": team_info["team_name"],
-                            "pick_overall": pick_overall,
-                            "round": round_num,
-                            "slot": slot_num,
-                            "identifiers": team_info["identifiers"]
-                        }
-
-        except Exception as e:
-            logger.error(f"Error consultando draft en url {url}: {e}")
+    except Exception as e:
+        logger.error(f"Error consultando draft en url {url}: {e}")
 
     return None
 
@@ -227,9 +215,46 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>2. Control del Draft</b>\n"
         "• <code>/whosOTC</code> : Muestra quién está en turno de elegir.\n"
         "• <code>/startdraft</code> : Inicia el rastreo automático del draft.\n"
-        "• <code>/stopdraft</code> : Detiene el rastreo del draft."
+        "• <code>/stopdraft</code> : Detiene el rastreo del draft.\n"
+        "• <code>/debugdraft</code> : Muestra el JSON crudo del draft para depuración."
     )
     await update.message.reply_text(mensaje, parse_mode="HTML")
+
+async def debug_draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando de diagnóstico para ver el formato crudo de la API."""
+    chat_id = update.effective_chat.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if not row:
+        await update.message.reply_text("⚠️ Configura primero una liga con /setLeague")
+        return
+
+    league_id = row[0]
+    current_year = datetime.now(timezone.utc).year
+    url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
+    
+    try:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        
+        # Extraer una muestra del JSON
+        sample = {}
+        if "rows" in data and len(data["rows"]) > 0:
+            sample["first_row_cells"] = data["rows"][0].get("cells", [])[:2]
+        elif "picks" in data:
+            sample["first_picks"] = data["picks"][:2]
+        else:
+            sample["keys_found"] = list(data.keys())
+
+        json_str = json.dumps(sample, indent=2)[:3500]
+        await update.message.reply_text(f"🔍 <b>Estructura de la API:</b>\n<pre>{html.escape(json_str)}</pre>", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Error en debug: {e}")
 
 async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Indica quién está OTC en la liga vinculada al chat actual."""
@@ -258,7 +283,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b> (El draft puede estar pausado o finalizado).", parse_mode="HTML")
+            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b>", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
@@ -302,8 +327,7 @@ async def start_draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"🚀 <b>¡Monitoreo de Draft Activado!</b>\n\n"
-            f"La liga <code>{html.escape(league_id)}</code> está siendo rastreada. "
-            f"El bot enviará notificaciones cuando le toque elegir a un nuevo manager.",
+            f"La liga <code>{html.escape(league_id)}</code> está siendo rastreada.",
             parse_mode="HTML"
         )
 
@@ -362,7 +386,6 @@ async def check_draft_updates(context: ContextTypes.DEFAULT_TYPE):
             handle = resolve_telegram_handle(otc_data["identifiers"], db_map)
             mention_user = handle if handle else html.escape(otc_data["team_name"])
 
-            # 1. Si no hay estado previo o cambió el pick -> Anunciar Nuevo OTC
             if not state or state[0] != curr_pick:
                 cursor.execute("""
                     INSERT INTO draft_state (chat_id, current_pick_overall, otc_team_id, otc_start_time, user_alert_sent, commish_alert_sent)
@@ -383,13 +406,11 @@ async def check_draft_updates(context: ContextTypes.DEFAULT_TYPE):
                 )
                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
 
-            # 2. Control de tiempo de alertas acumuladas
             else:
                 _, _, start_time, user_sent, commish_sent = state
                 if start_time:
                     elapsed_hours = (now - start_time).total_seconds() / 3600.0
 
-                    # Alerta Usuario
                     if elapsed_hours >= user_h and not user_sent:
                         cursor.execute("UPDATE draft_state SET user_alert_sent = TRUE WHERE chat_id = %s;", (chat_id,))
                         conn.commit()
@@ -399,7 +420,6 @@ async def check_draft_updates(context: ContextTypes.DEFAULT_TYPE):
                             parse_mode="HTML"
                         )
 
-                    # Alerta Comisionado
                     if elapsed_hours >= commish_h and not commish_sent:
                         cursor.execute("UPDATE draft_state SET commish_alert_sent = TRUE WHERE chat_id = %s;", (chat_id,))
                         conn.commit()
@@ -594,6 +614,7 @@ def main():
     app.add_handler(CommandHandler("whosOTC", whos_otc))
     app.add_handler(CommandHandler("startdraft", start_draft))
     app.add_handler(CommandHandler("stopdraft", stop_draft))
+    app.add_handler(CommandHandler("debugdraft", debug_draft))
 
     # Tarea en segundo plano (revisa el draft cada 60 segundos)
     if app.job_queue:
