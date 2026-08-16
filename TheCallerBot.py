@@ -141,7 +141,7 @@ def get_fleaflicker_teams_info(league_id: str):
     return list(teams_dict.values())
 
 def get_current_otc_data(league_id: str):
-    """Obtiene el pick activo inspeccionando los picks sin jugador de Fleaflicker."""
+    """Obtiene el pick activo inspeccionando recursivamente el JSON de Fleaflicker."""
     current_year = datetime.now(timezone.utc).year
     
     urls = [
@@ -155,27 +155,44 @@ def get_current_otc_data(league_id: str):
             if res.status_code == 200:
                 data = res.json()
                 
-                # 1. Buscar en la lista plana de picks (si existe)
-                picks = data.get("picks", [])
+                # Extraer celdas/picks desde cualquier estructura del JSON
+                all_cells = []
                 
-                # Si no está en 'picks', buscar dentro de 'rows' -> 'cells'
-                if not picks:
-                    for row in data.get("rows", []):
-                        for cell in row.get("cells", []):
-                            picks.append(cell)
+                if "picks" in data and isinstance(data["picks"], list):
+                    all_cells.extend(data["picks"])
+                    
+                if "rows" in data and isinstance(data["rows"], list):
+                    for row in data["rows"]:
+                        cells = row.get("cells", [])
+                        all_cells.extend(cells)
 
-                # Buscar el PRIMER pick que NO tenga jugador asignado
-                for pick in picks:
-                    has_player = bool(pick.get("player") or pick.get("playerInfo"))
-                    team = pick.get("team")
+                if "orderedPicks" in data and isinstance(data["orderedPicks"], list):
+                    all_cells.extend(data["orderedPicks"])
 
-                    if not has_player and team:
-                        team_info = parse_team_data(team)
+                # Analizar de forma secuencial
+                for idx, cell in enumerate(all_cells):
+                    team_obj = cell.get("team") or cell.get("claimTeam")
+                    
+                    if not team_obj and "roster" in cell:
+                        team_obj = cell["roster"].get("team")
+
+                    if not team_obj:
+                        continue
+
+                    # Verificar si YA tiene un jugador seleccionado
+                    has_player = False
+                    if cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer"):
+                        has_player = True
+                    elif cell.get("isExecuted") is True:
+                        has_player = True
+
+                    # El primer elemento sin jugador asignado es el OTC actual
+                    if not has_player:
+                        team_info = parse_team_data(team_obj)
                         
-                        # Extraer número de pick/ronda/slot
-                        pick_overall = pick.get("overall") or pick.get("pick") or 1
-                        round_num = pick.get("round") or 1
-                        slot_num = pick.get("slot") or pick.get("roundSlot") or 1
+                        round_num = cell.get("round") or cell.get("roundNum") or 1
+                        slot_num = cell.get("slot") or cell.get("slotNum") or 1
+                        pick_overall = cell.get("overall") or cell.get("overallPick") or (idx + 1)
 
                         return {
                             "team_id": team_info["team_id"],
@@ -185,6 +202,7 @@ def get_current_otc_data(league_id: str):
                             "slot": slot_num,
                             "identifiers": team_info["identifiers"]
                         }
+
         except Exception as e:
             logger.error(f"Error consultando draft en url {url}: {e}")
 
