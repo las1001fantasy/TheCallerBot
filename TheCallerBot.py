@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 from datetime import datetime, timezone
 import html
 import requests
@@ -131,78 +132,26 @@ def get_fleaflicker_teams_info(league_id: str):
     return list(teams_dict.values())
 
 def get_current_otc_data(league_id: str):
-    """
-    Estrategia Robusta:
-    Busca celdas en el borrador comprobando múltiples campos de confirmación.
-    """
+    """Diagnóstico directo por logs del JSON retornado por Fleaflicker."""
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
 
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return None
-
-        data = res.json()
-        
-        # 1. Recopilar absolutamente todas las celdas posibles
-        cells = []
-        if "rows" in data and isinstance(data["rows"], list):
-            for r_idx, row in enumerate(data["rows"]):
-                row_cells = row.get("cells", [])
-                for s_idx, cell in enumerate(row_cells):
-                    cell["_calculated_round"] = r_idx + 1
-                    cell["_calculated_slot"] = s_idx + 1
-                    cells.append(cell)
-
-        if not cells and "orderedPicks" in data:
-            cells = data["orderedPicks"]
-
-        if not cells and "picks" in data:
-            cells = data["picks"]
-
-        overall_counter = 1
-        for cell in cells:
-            team_obj = cell.get("team") or cell.get("claimTeam") or cell.get("roster", {}).get("team")
-
-            if not team_obj:
-                continue
-
-            # Múltiples comprobaciones para saber si el pick YA SE REALIZÓ
-            has_player = False
+        if res.status_code == 200:
+            data = res.json()
             
-            # Check 1: Objeto jugador directo o anidado
-            if cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer"):
-                has_player = True
-            
-            # Check 2: Flag explícito de ejecución
-            if cell.get("isExecuted") is True or cell.get("executed") is True:
-                has_player = True
+            logger.info(f"--- FLEAFLICKER KEYS: {list(data.keys())} ---")
 
-            # Check 3: Presencia de marca de tiempo de selección
-            if cell.get("timeObtained") or cell.get("date"):
-                has_player = True
-
-            # El primer pick que NO cumpla ninguna condición de estar drafteado es el OTC
-            if not has_player:
-                team_info = parse_team_data(team_obj)
-                round_num = cell.get("round") or cell.get("_calculated_round") or 1
-                slot_num = cell.get("slot") or cell.get("_calculated_slot") or 1
-                pick_overall = cell.get("overall") or overall_counter
-
-                return {
-                    "team_id": team_info["team_id"],
-                    "team_name": team_info["team_name"],
-                    "pick_overall": pick_overall,
-                    "round": round_num,
-                    "slot": slot_num,
-                    "identifiers": team_info["identifiers"]
-                }
-
-            overall_counter += 1
+            if "rows" in data and len(data["rows"]) > 0:
+                logger.info(f"--- MUESTRA ROW 0: {data['rows'][0]} ---")
+            elif "picks" in data and len(data["picks"]) > 0:
+                logger.info(f"--- MUESTRA PICK 0: {data['picks'][0]} ---")
+            else:
+                logger.info(f"--- JSON COMPLETO: {data} ---")
 
     except Exception as e:
-        logger.error(f"Error procesando OTC para liga {league_id}: {e}")
+        logger.error(f"Error en debug de Fleaflicker: {e}")
 
     return None
 
@@ -256,7 +205,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 <b>No se encontró turno activo.</b>\n(El draft podría estar completado o pausado en la plataforma).", parse_mode="HTML")
+            await update.message.reply_text("🏈 <b>Inspección enviada a los logs.</b> Revisa la consola del servidor.", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
@@ -540,7 +489,7 @@ async def list_managers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         league_id = row[0]
-        cursor.execute("SELECT fleaflicker_id, team_name, telegram_handle FROM user_mappings;")
+        cursor.execute("SELECT fleaflicker_id, telegram_handle FROM user_mappings;")
         mappings = cursor.fetchall()
         cursor.close()
         conn.close()
