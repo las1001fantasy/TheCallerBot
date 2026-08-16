@@ -131,68 +131,70 @@ def get_fleaflicker_teams_info(league_id: str):
 
     return list(teams_dict.values())
 
-def is_player_assigned(cell):
-    """Determina estrictamente si un pick ya tiene un jugador drafteado."""
-    player_obj = cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer")
-    if not player_obj:
-        return False
-    
-    # Si existe el objeto 'proPlayer' o 'player', verificar si tiene ID válido
-    if isinstance(player_obj, dict):
-        p_info = player_obj.get("proPlayer") or player_obj.get("player") or player_obj
-        if p_info.get("id"):
-            return True
-
-    return False
-
 def get_current_otc_data(league_id: str):
-    """Obtiene el pick activo inspeccionando las celdas del borrador de Fleaflicker."""
+    """
+    Lógica directa: 
+    1. Obtenemos todas las celdas/picks del borrador.
+    2. Si una celda tiene un 'player' asignado con ID, el pick ya se hizo.
+    3. El primer pick sin jugador asignado es el que está OTC.
+    """
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
 
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
+        if res.status_code != 200:
+            return None
+
+        data = res.json()
+        
+        # Extraer todas las celdas de las filas (o lista directa de picks)
+        picks = []
+        if "rows" in data:
+            for row in data["rows"]:
+                picks.extend(row.get("cells", []))
+        elif "picks" in data:
+            picks = data["picks"]
+
+        overall_counter = 1
+        for pick in picks:
+            # Identificar el equipo dueño del pick
+            team_obj = pick.get("team") or pick.get("claimTeam")
+            if not team_obj and "roster" in pick:
+                team_obj = pick["roster"].get("team")
+
+            if not team_obj:
+                continue
+
+            # Comprobar si hay un jugador drafteado en este pick
+            player = pick.get("player") or pick.get("playerInfo")
+            has_player_id = False
             
-            all_cells = []
-            if "rows" in data and isinstance(data["rows"], list):
-                for row in data["rows"]:
-                    cells = row.get("cells", [])
-                    all_cells.extend(cells)
+            if isinstance(player, dict):
+                # Verificar si tiene ID de jugador directo o anidado
+                p_id = player.get("id") or (player.get("proPlayer") and player["proPlayer"].get("id"))
+                if p_id:
+                    has_player_id = True
 
-            if "picks" in data and isinstance(data["picks"], list):
-                all_cells.extend(data["picks"])
-
-            # Iterar por todas las selecciones
-            for idx, cell in enumerate(all_cells):
-                team_obj = cell.get("team") or cell.get("claimTeam")
-                if not team_obj and "roster" in cell:
-                    team_obj = cell["roster"].get("team")
-
-                # Si la celda no tiene equipo asignado, la ignoramos
-                if not team_obj:
-                    continue
-
-                # Si NO tiene jugador asignado, este es el pick OTC
-                if not is_player_assigned(cell):
-                    team_info = parse_team_data(team_obj)
-                    
-                    round_num = cell.get("round") or 1
-                    slot_num = cell.get("slot") or 1
-                    pick_overall = cell.get("overall") or (idx + 1)
-
-                    return {
-                        "team_id": team_info["team_id"],
-                        "team_name": team_info["team_name"],
-                        "pick_overall": pick_overall,
-                        "round": round_num,
-                        "slot": slot_num,
-                        "identifiers": team_info["identifiers"]
-                    }
+            # Si NO tiene ID de jugador asignado, ¡este es el equipo OTC!
+            if not has_player_id:
+                team_info = parse_team_data(team_obj)
+                round_num = pick.get("round") or 1
+                slot_num = pick.get("slot") or 1
+                
+                return {
+                    "team_id": team_info["team_id"],
+                    "team_name": team_info["team_name"],
+                    "pick_overall": pick.get("overall") or overall_counter,
+                    "round": round_num,
+                    "slot": slot_num,
+                    "identifiers": team_info["identifiers"]
+                }
+            
+            overall_counter += 1
 
     except Exception as e:
-        logger.error(f"Error consultando draft en url {url}: {e}")
+        logger.error(f"Error procesando OTC para liga {league_id}: {e}")
 
     return None
 
@@ -215,46 +217,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>2. Control del Draft</b>\n"
         "• <code>/whosOTC</code> : Muestra quién está en turno de elegir.\n"
         "• <code>/startdraft</code> : Inicia el rastreo automático del draft.\n"
-        "• <code>/stopdraft</code> : Detiene el rastreo del draft.\n"
-        "• <code>/debugdraft</code> : Muestra el JSON crudo del draft para depuración."
+        "• <code>/stopdraft</code> : Detiene el rastreo del draft."
     )
     await update.message.reply_text(mensaje, parse_mode="HTML")
-
-async def debug_draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando de diagnóstico para ver el formato crudo de la API."""
-    chat_id = update.effective_chat.id
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT league_id FROM leagues WHERE chat_id = %s;", (chat_id,))
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
-    if not row:
-        await update.message.reply_text("⚠️ Configura primero una liga con /setLeague")
-        return
-
-    league_id = row[0]
-    current_year = datetime.now(timezone.utc).year
-    url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
-    
-    try:
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        
-        # Extraer una muestra del JSON
-        sample = {}
-        if "rows" in data and len(data["rows"]) > 0:
-            sample["first_row_cells"] = data["rows"][0].get("cells", [])[:2]
-        elif "picks" in data:
-            sample["first_picks"] = data["picks"][:2]
-        else:
-            sample["keys_found"] = list(data.keys())
-
-        json_str = json.dumps(sample, indent=2)[:3500]
-        await update.message.reply_text(f"🔍 <b>Estructura de la API:</b>\n<pre>{html.escape(json_str)}</pre>", parse_mode="HTML")
-    except Exception as e:
-        await update.message.reply_text(f"Error en debug: {e}")
 
 async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Indica quién está OTC en la liga vinculada al chat actual."""
@@ -283,7 +248,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b>", parse_mode="HTML")
+            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b> (Draft pausado o finalizado).", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
@@ -614,13 +579,12 @@ def main():
     app.add_handler(CommandHandler("whosOTC", whos_otc))
     app.add_handler(CommandHandler("startdraft", start_draft))
     app.add_handler(CommandHandler("stopdraft", stop_draft))
-    app.add_handler(CommandHandler("debugdraft", debug_draft))
 
-    # Tarea en segundo plano (revisa el draft cada 60 segundos)
+    # Tarea en segundo plano
     if app.job_queue:
         app.job_queue.run_repeating(check_draft_updates, interval=60, first=10)
 
-    logger.info("Bot iniciado con monitoreo de drafts...")
+    logger.info("Bot iniciado...")
     app.run_polling()
 
 if __name__ == "__main__":
