@@ -132,7 +132,8 @@ def get_fleaflicker_teams_info(league_id: str):
 
 def get_current_otc_data(league_id: str):
     """
-    Parsea de forma precisa la estructura 'rows' -> 'cells' extraída de los logs.
+    Parsea las filas del Draft Board de Fleaflicker para encontrar
+    el primer pick pendiente (OTC).
     """
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
@@ -140,6 +141,7 @@ def get_current_otc_data(league_id: str):
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
+            logger.error(f"Error HTTP {res.status_code} al consultar Draft Board")
             return None
 
         data = res.json()
@@ -148,16 +150,18 @@ def get_current_otc_data(league_id: str):
         for round_index, row in enumerate(rows, start=1):
             cells = row.get("cells", [])
             for slot_index, cell in enumerate(cells, start=1):
-                # Si executed es False o no existe, o si no hay un jugador asignado
+                # Comprobar si la celda ya fue ejecutada o tiene jugador asignado
                 is_executed = cell.get("executed", False)
                 has_player = bool(cell.get("player"))
 
+                # El pick activo es el primero que NO está ejecutado y NO tiene jugador
                 if not is_executed and not has_player:
                     team_obj = cell.get("claimTeam") or cell.get("team")
                     
-                    # Si no hay objeto directo de equipo, buscar en el roster
                     if not team_obj and "roster" in cell:
                         team_obj = cell["roster"].get("team")
+                    if not team_obj and "slot" in cell:
+                        team_obj = cell["slot"].get("team")
 
                     team_info = parse_team_data(team_obj)
                     pick_overall = cell.get("overall") or ((round_index - 1) * len(cells) + slot_index)
