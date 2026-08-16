@@ -132,51 +132,50 @@ def get_fleaflicker_teams_info(league_id: str):
 
 def get_current_otc_data(league_id: str):
     """
-    Parsea las filas del Draft Board de Fleaflicker para encontrar
-    el primer pick pendiente (OTC).
+    Función de diagnóstico profundo: Imprime información clave en consola
+    para identificar la celda exacta del turno en la API de Fleaflicker.
     """
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
 
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            logger.error(f"Error HTTP {res.status_code} al consultar Draft Board")
-            return None
+        logger.info(f"--- STATUS CODE API: {res.status_code} ---")
 
-        data = res.json()
-        rows = data.get("rows", [])
+        if res.status_code == 200:
+            data = res.json()
+            rows = data.get("rows", [])
+            logger.info(f"--- TOTAL FILAS (RONDAS): {len(rows)} ---")
 
-        for round_index, row in enumerate(rows, start=1):
-            cells = row.get("cells", [])
-            for slot_index, cell in enumerate(cells, start=1):
-                # Comprobar si la celda ya fue ejecutada o tiene jugador asignado
-                is_executed = cell.get("executed", False)
-                has_player = bool(cell.get("player"))
+            for r_idx, row in enumerate(rows, start=1):
+                cells = row.get("cells", [])
+                for c_idx, cell in enumerate(cells, start=1):
+                    # Se imprimen en log las celdas que no tienen 'player'
+                    if not cell.get("player"):
+                        logger.info(f"--- CELDA SIN JUGADOR (Ronda {r_idx}, Pick {c_idx}): {cell} ---")
 
-                # El pick activo es el primero que NO está ejecutado y NO tiene jugador
-                if not is_executed and not has_player:
-                    team_obj = cell.get("claimTeam") or cell.get("team")
-                    
-                    if not team_obj and "roster" in cell:
-                        team_obj = cell["roster"].get("team")
-                    if not team_obj and "slot" in cell:
-                        team_obj = cell["slot"].get("team")
+                        team_obj = (
+                            cell.get("claimTeam") or
+                            cell.get("team") or
+                            cell.get("roster", {}).get("team") or
+                            cell.get("slot", {}).get("team")
+                        )
+                        team_info = parse_team_data(team_obj)
+                        pick_overall = cell.get("overall") or ((r_idx - 1) * len(cells) + c_idx)
 
-                    team_info = parse_team_data(team_obj)
-                    pick_overall = cell.get("overall") or ((round_index - 1) * len(cells) + slot_index)
+                        return {
+                            "team_id": team_info["team_id"],
+                            "team_name": team_info["team_name"],
+                            "pick_overall": pick_overall,
+                            "round": r_idx,
+                            "slot": c_idx,
+                            "identifiers": team_info["identifiers"]
+                        }
 
-                    return {
-                        "team_id": team_info["team_id"],
-                        "team_name": team_info["team_name"],
-                        "pick_overall": pick_overall,
-                        "round": round_index,
-                        "slot": slot_index,
-                        "identifiers": team_info["identifiers"]
-                    }
+            logger.info("--- NO SE ENCONTRÓ NINGUNA CELDA SIN JUGADOR ---")
 
     except Exception as e:
-        logger.error(f"Error parseando draft board de Fleaflicker: {e}")
+        logger.error(f"Error en debug OTC: {e}")
 
     return None
 
