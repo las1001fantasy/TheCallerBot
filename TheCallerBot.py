@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 from datetime import datetime, timezone
 import html
 import requests
@@ -133,10 +132,8 @@ def get_fleaflicker_teams_info(league_id: str):
 
 def get_current_otc_data(league_id: str):
     """
-    Lógica directa: 
-    1. Obtenemos todas las celdas/picks del borrador.
-    2. Si una celda tiene un 'player' asignado con ID, el pick ya se hizo.
-    3. El primer pick sin jugador asignado es el que está OTC.
+    Estrategia Robusta:
+    Busca celdas en el borrador comprobando múltiples campos de confirmación.
     """
     current_year = datetime.now(timezone.utc).year
     url = f"https://www.fleaflicker.com/api/FetchLeagueDraftBoard?sport=nfl&league_id={league_id}&season={current_year}"
@@ -148,49 +145,60 @@ def get_current_otc_data(league_id: str):
 
         data = res.json()
         
-        # Extraer todas las celdas de las filas (o lista directa de picks)
-        picks = []
-        if "rows" in data:
-            for row in data["rows"]:
-                picks.extend(row.get("cells", []))
-        elif "picks" in data:
-            picks = data["picks"]
+        # 1. Recopilar absolutamente todas las celdas posibles
+        cells = []
+        if "rows" in data and isinstance(data["rows"], list):
+            for r_idx, row in enumerate(data["rows"]):
+                row_cells = row.get("cells", [])
+                for s_idx, cell in enumerate(row_cells):
+                    cell["_calculated_round"] = r_idx + 1
+                    cell["_calculated_slot"] = s_idx + 1
+                    cells.append(cell)
+
+        if not cells and "orderedPicks" in data:
+            cells = data["orderedPicks"]
+
+        if not cells and "picks" in data:
+            cells = data["picks"]
 
         overall_counter = 1
-        for pick in picks:
-            # Identificar el equipo dueño del pick
-            team_obj = pick.get("team") or pick.get("claimTeam")
-            if not team_obj and "roster" in pick:
-                team_obj = pick["roster"].get("team")
+        for cell in cells:
+            team_obj = cell.get("team") or cell.get("claimTeam") or cell.get("roster", {}).get("team")
 
             if not team_obj:
                 continue
 
-            # Comprobar si hay un jugador drafteado en este pick
-            player = pick.get("player") or pick.get("playerInfo")
-            has_player_id = False
+            # Múltiples comprobaciones para saber si el pick YA SE REALIZÓ
+            has_player = False
             
-            if isinstance(player, dict):
-                # Verificar si tiene ID de jugador directo o anidado
-                p_id = player.get("id") or (player.get("proPlayer") and player["proPlayer"].get("id"))
-                if p_id:
-                    has_player_id = True
+            # Check 1: Objeto jugador directo o anidado
+            if cell.get("player") or cell.get("playerInfo") or cell.get("proPlayer"):
+                has_player = True
+            
+            # Check 2: Flag explícito de ejecución
+            if cell.get("isExecuted") is True or cell.get("executed") is True:
+                has_player = True
 
-            # Si NO tiene ID de jugador asignado, ¡este es el equipo OTC!
-            if not has_player_id:
+            # Check 3: Presencia de marca de tiempo de selección
+            if cell.get("timeObtained") or cell.get("date"):
+                has_player = True
+
+            # El primer pick que NO cumpla ninguna condición de estar drafteado es el OTC
+            if not has_player:
                 team_info = parse_team_data(team_obj)
-                round_num = pick.get("round") or 1
-                slot_num = pick.get("slot") or 1
-                
+                round_num = cell.get("round") or cell.get("_calculated_round") or 1
+                slot_num = cell.get("slot") or cell.get("_calculated_slot") or 1
+                pick_overall = cell.get("overall") or overall_counter
+
                 return {
                     "team_id": team_info["team_id"],
                     "team_name": team_info["team_name"],
-                    "pick_overall": pick.get("overall") or overall_counter,
+                    "pick_overall": pick_overall,
                     "round": round_num,
                     "slot": slot_num,
                     "identifiers": team_info["identifiers"]
                 }
-            
+
             overall_counter += 1
 
     except Exception as e:
@@ -248,7 +256,7 @@ async def whos_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         otc_info = get_current_otc_data(league_id)
 
         if not otc_info:
-            await update.message.reply_text("🏈 <b>No hay ningún pick activo en este momento.</b> (Draft pausado o finalizado).", parse_mode="HTML")
+            await update.message.reply_text("🏈 <b>No se encontró turno activo.</b>\n(El draft podría estar completado o pausado en la plataforma).", parse_mode="HTML")
             return
 
         handle = resolve_telegram_handle(otc_info["identifiers"], db_map)
