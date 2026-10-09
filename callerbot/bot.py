@@ -25,7 +25,7 @@ HELP = """CallerBot avisa de quién está on the clock en los drafts de Fleaflic
 
 Comandos públicos:
 /ping - Comprueba que el bot está funcionando
-/setLeague leagueID @commish (opcional) - Asigna la liga de Fleaflicker a este canal. El leagueID es el último número de la URL de la liga, p. ej. www.fleaflicker.com/nfl/leagues/312835
+/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) - Asigna la liga de Fleaflicker a este canal. El leagueID es el último número de la URL de la liga, p. ej. www.fleaflicker.com/nfl/leagues/312835
 /getChannelID - Devuelve el ID del canal
 /getTeams - Lista los equipos con su usuario de Fleaflicker y de Telegram
 /whosOTC - Quién está on the clock (también vale escribir "who's on the clock")
@@ -445,7 +445,9 @@ def main() -> None:
     # En Railway, si hay un volumen montado guardamos ahí la base de datos para que sobreviva a los reinicios.
     volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     default_db = os.path.join(volume, "callerbot.db") if volume else "callerbot.db"
-    app.bot_data["storage"] = Storage(os.environ.get("DB_PATH", default_db))
+    db_path = os.environ.get("DB_PATH", default_db)
+    app.bot_data["storage"] = Storage(db_path)
+    log.info("Base de datos en %s (%s)", db_path, "volumen de Railway" if volume else "SIN volumen: se borra al reiniciar")
 
     # python-telegram-bot compara los comandos sin distinguir mayúsculas: /setLeague == /setleague
     for name, handler in COMMANDS.items():

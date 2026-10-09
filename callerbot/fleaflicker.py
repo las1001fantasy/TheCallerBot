@@ -51,15 +51,24 @@ async def fetch_board(client: httpx.AsyncClient, league_id: int, sport: str | No
 
 
 async def detect_sport(client: httpx.AsyncClient, league_id: int) -> str:
-    """Prueba cada deporte hasta encontrar el draft board de la liga."""
-    last: Exception | None = None
+    """Busca primero un draft board en cada deporte y, si no hay ninguno, una clasificación.
+
+    El mismo ID puede existir en varios deportes, así que el draft board manda; para evitar dudas
+    se puede indicar el deporte en /setLeague (p. ej. /setLeague 30332 NBA).
+    """
     for sport in SPORTS:
         try:
-            await fetch_state(client, league_id, sport)
+            await fetch_board(client, league_id, sport)
             return sport
-        except (FleaflickerError, httpx.HTTPError, ValueError) as e:
-            last = e
-    raise FleaflickerError(f"No encuentro la liga {league_id} en Fleaflicker ({last})")
+        except (FleaflickerError, httpx.HTTPError, ValueError):
+            pass
+    for sport in SPORTS:
+        try:
+            if await _standings_teams(client, league_id, sport):
+                return sport
+        except (httpx.HTTPError, ValueError):
+            pass
+    raise FleaflickerError(f"No encuentro la liga {league_id} en Fleaflicker")
 
 
 def _team(raw: dict) -> Team:
