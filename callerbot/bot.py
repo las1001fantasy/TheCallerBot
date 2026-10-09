@@ -15,7 +15,7 @@ from telegram import Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_board, parse_board
+from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_state
 from .storage import Storage
 
 log = logging.getLogger("callerbot")
@@ -96,11 +96,14 @@ async def require_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE, manager
 
 
 async def load_state(ctx: ContextTypes.DEFAULT_TYPE, league) -> DraftState:
-    return parse_board(await fetch_board(http(ctx), league["league_id"], league["sport"]))
+    return await fetch_state(http(ctx), league["league_id"], league["sport"])
 
 
 def telegram_of(team: Team, users: dict[str, str]) -> list[str]:
-    return [mention(users[norm(o)]) for o in team.owners if norm(o) in users]
+    found = [mention(users[norm(o)]) for o in team.owners if norm(o) in users]
+    if not found and norm(team.name) in users:
+        found = [mention(users[norm(team.name)])]
+    return found
 
 
 def who(team: Team, users: dict[str, str]) -> str:
@@ -150,7 +153,7 @@ async def cmd_setleague(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     sport = next((a.upper() for a in args[1:] if a.upper() in SPORTS), None)
     try:
         sport = sport or await detect_sport(http(ctx), league_id)
-        state = parse_board(await fetch_board(http(ctx), league_id, sport))
+        state = await fetch_state(http(ctx), league_id, sport)
     except (FleaflickerError, httpx.HTTPError) as e:
         await reply(update, f"No he podido leer la liga: {e}")
         return
@@ -238,13 +241,13 @@ async def cmd_getmissingusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         return
     users = storage(ctx).users(*channel(update))
     missing = [f"{o} ({t.name})" for t in state.teams for o in t.owners if norm(o) not in users]
-    orphan = [t.name for t in state.teams if not t.owners]
+    orphan = [t.name for t in state.teams if not t.owners and norm(t.name) not in users]
     if not missing and not orphan:
         await reply(update, "Todos los usuarios de Fleaflicker tienen Telegram asociado.")
         return
     lines = ["Sin usuario de Telegram:", *missing] if missing else []
     if orphan:
-        lines += ["Equipos sin dueño en Fleaflicker:", *orphan]
+        lines += ["Equipos sin dueño en Fleaflicker (asócialos por nombre, sin espacios: NombreEquipo.@telegram):", *orphan]
     await reply(update, "\n".join(lines))
 
 

@@ -127,3 +127,40 @@ def parse_board(data: dict) -> DraftState:
     made = sum(1 for _, s in picks if s.get("player"))
     ordered = sorted(teams.values(), key=lambda t: (t.slot is None, t.slot or 0, t.name))
     return DraftState(teams=ordered, on_the_clock=otc, picks_made=made)
+
+
+async def fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | None) -> dict[int, list[str]]:
+    """Dueños de cada equipo. El draft board no siempre los trae; la clasificación y las plantillas sí."""
+    params = {"league_id": league_id}
+    if sport:
+        params["sport"] = sport
+    owners: dict[int, list[str]] = {}
+    for endpoint in ("FetchLeagueStandings", "FetchLeagueRosters"):
+        try:
+            r = await client.get(f"{API}/{endpoint}", params=params, timeout=20)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+        except (httpx.HTTPError, ValueError):
+            continue
+        raw_teams = [t for d in data.get("divisions", []) for t in d.get("teams", [])]
+        raw_teams += [ro.get("team", {}) for ro in data.get("rosters", [])]
+        for raw in raw_teams:
+            if raw.get("id") is None:
+                continue
+            team = _team(raw)
+            if team.owners:
+                owners.setdefault(team.id, team.owners)
+        if owners:
+            break
+    return owners
+
+
+async def fetch_state(client: httpx.AsyncClient, league_id: int, sport: str | None) -> DraftState:
+    state = parse_board(await fetch_board(client, league_id, sport))
+    if any(not t.owners for t in state.teams):
+        owners = await fetch_owners(client, league_id, sport)
+        for t in state.teams:
+            if not t.owners:
+                t.owners = owners.get(t.id, [])
+    return state
