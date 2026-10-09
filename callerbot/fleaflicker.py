@@ -164,3 +164,68 @@ async def fetch_state(client: httpx.AsyncClient, league_id: int, sport: str | No
             if not t.owners:
                 t.owners = owners.get(t.id, [])
     return state
+
+
+# ---------- Revisión de alineaciones ----------
+
+# Estados que no deberían estar en la alineación titular. Las Q (questionable) no se avisan a propósito.
+BAD_STATUS = {"O", "OUT", "IR", "PUP", "NFI", "EX", "SUSP", "SUS", "D", "DOUBTFUL", "INJURED_RESERVE", "SUSPENDED"}
+OK_STATUS = {"", "Q", "QUESTIONABLE", "P", "PROBABLE", "GTD", "DTD", "ACTIVE", "HEALTHY"}
+
+
+async def fetch_roster(client: httpx.AsyncClient, league_id: int, sport: str | None, team_id: int) -> dict:
+    params = {"league_id": league_id, "team_id": team_id}
+    if sport:
+        params["sport"] = sport
+    r = await client.get(f"{API}/FetchRoster", params=params, timeout=20)
+    if r.status_code != 200:
+        raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
+    return r.json()
+
+
+def _status(pro: dict) -> str:
+    injury = pro.get("injury") or {}
+    # Fleaflicker escribe "typeAbbreviaition" (con la errata); probamos también la forma correcta.
+    for key in ("typeAbbreviaition", "typeAbbreviation", "severity", "typeFull"):
+        if injury.get(key):
+            return str(injury[key]).upper()
+    return ""
+
+
+def _is_rookie(pro: dict) -> bool | None:
+    for key in ("isRookie", "rookie"):
+        if key in pro:
+            return bool(pro[key])
+    for key in ("yearsOfExperience", "experience", "yearsExperience"):
+        if key in pro:
+            return int(pro[key] or 0) == 0
+    return None  # no sabemos
+
+
+def roster_issues(data: dict) -> list[str]:
+    """Problemas de una plantilla: lesionados de titular, sanos en IR, no rookies en TAXI, huecos vacíos."""
+    issues: list[str] = []
+    for group in data.get("groups", []):
+        gname = str(group.get("group") or group.get("label") or "").upper()
+        for slot in group.get("slots", []):
+            pos = slot.get("position") or {}
+            label = str(pos.get("label") or "").upper()
+            where = label or gname
+            lp = slot.get("leaguePlayer") or {}
+            pro = lp.get("proPlayer") or {}
+            starter = gname == "START"
+            in_ir = gname in ("INJURED", "INJURED_RESERVE") or label in ("IR", "INJ")
+            in_taxi = gname == "TAXI" or label == "TAXI"
+            if not pro:
+                if starter:
+                    issues.append(f"hueco vacío en {where}")
+                continue
+            name = pro.get("nameFull") or pro.get("nameShort") or "?"
+            status = _status(pro)
+            if starter and status in BAD_STATUS:
+                issues.append(f"{name} ({status}) de titular en {where}")
+            elif in_ir and status in OK_STATUS:
+                issues.append(f"{name} está sano{f' ({status})' if status else ''} y ocupa un hueco de IR")
+            elif in_taxi and _is_rookie(pro) is False:
+                issues.append(f"{name} no es rookie y está en TAXI")
+    return issues

@@ -5,6 +5,7 @@ Cada canal (un grupo, o un tema dentro de un grupo con temas) tiene como mucho u
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from telegram import Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_state
+from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_roster, fetch_state, roster_issues
 from .storage import Storage
 
 log = logging.getLogger("callerbot")
@@ -28,6 +29,7 @@ Comandos públicos:
 /getChannelID - Devuelve el ID del canal
 /getTeams - Lista los equipos con su usuario de Fleaflicker y de Telegram
 /whosOTC - Quién está on the clock (también vale escribir "who's on the clock")
+/getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) de titular, sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
 
 Gestión de la liga (commish o admins del grupo):
 /getLeague - Liga asignada a este canal
@@ -198,6 +200,40 @@ async def cmd_whosotc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await reply(update, f"Error leyendo Fleaflicker: {e}")
         return
     await reply(update, otc_line(state, storage(ctx).users(*channel(update))))
+
+
+async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    league = await require_league(update, ctx, manager=False)
+    if not league:
+        return
+    try:
+        state = await load_state(ctx, league)
+    except (FleaflickerError, httpx.HTTPError) as e:
+        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        return
+    await reply(update, "Revisando las plantillas, tarda unos segundos...")
+
+    async def one(team: Team):
+        try:
+            data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
+            if not data.get("groups"):
+                log.warning("FetchRoster sin 'groups' para el equipo %s: claves %s", team.id, list(data))
+            return team, roster_issues(data), None
+        except (FleaflickerError, httpx.HTTPError, ValueError) as e:
+            return team, [], str(e)
+
+    results = await asyncio.gather(*(one(t) for t in state.teams))
+    lines, failed = [], []
+    for team, issues, error in results:
+        owner = ", ".join(team.owners) or "sin dueño"
+        if error:
+            failed.append(f"{team.name}: {error}")
+        elif issues:
+            lines.append(f"• {team.name} ({owner}):\n  - " + "\n  - ".join(issues))
+    text = "\n".join(["Plantillas con incidencias:", *lines]) if lines else "Todas las plantillas están en regla."
+    if failed:
+        text += "\n\nNo he podido revisar:\n" + "\n".join(failed)
+    await reply(update, text)
 
 
 # ---------- Gestión de la liga ----------
@@ -383,6 +419,7 @@ COMMANDS = {
     "whosotc": cmd_whosotc, "getleague": cmd_getleague, "getleagueinfo": cmd_getleagueinfo,
     "getmissingusers": cmd_getmissingusers, "unsetleague": cmd_unsetleague, "setcommish": cmd_setcommish,
     "addtelegramusers": cmd_addtelegramusers, "startdraft": cmd_startdraft, "stopdraft": cmd_stopdraft,
+    "getillegalrosters": cmd_getillegalrosters,
     "setreminderduration": cmd_setreminderduration, "setnotificationduration": cmd_setnotificationduration,
 }
 
