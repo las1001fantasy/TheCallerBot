@@ -443,9 +443,11 @@ def main() -> None:
 
     app = Application.builder().token(token).post_init(on_startup).post_shutdown(on_shutdown).build()
     # En Railway, si hay un volumen montado guardamos ahí la base de datos para que sobreviva a los reinicios.
+    # Una ruta relativa en DB_PATH (como la de .env.example) también va dentro del volumen.
     volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    default_db = os.path.join(volume, "callerbot.db") if volume else "callerbot.db"
-    db_path = os.environ.get("DB_PATH", default_db)
+    db_path = os.environ.get("DB_PATH") or "callerbot.db"
+    if volume and not os.path.isabs(db_path):
+        db_path = os.path.join(volume, db_path)
     app.bot_data["storage"] = Storage(db_path)
     log.info("Base de datos en %s (%s)", db_path, "volumen de Railway" if volume else "SIN volumen: se borra al reiniciar")
 
