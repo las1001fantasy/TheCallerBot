@@ -55,7 +55,7 @@ async def detect_sport(client: httpx.AsyncClient, league_id: int) -> str:
     last: Exception | None = None
     for sport in SPORTS:
         try:
-            await fetch_board(client, league_id, sport)
+            await fetch_state(client, league_id, sport)
             return sport
         except (FleaflickerError, httpx.HTTPError, ValueError) as e:
             last = e
@@ -129,6 +129,16 @@ def parse_board(data: dict) -> DraftState:
     return DraftState(teams=ordered, on_the_clock=otc, picks_made=made)
 
 
+async def _standings_teams(client: httpx.AsyncClient, league_id: int, sport: str | None) -> list[Team]:
+    params = {"league_id": league_id}
+    if sport:
+        params["sport"] = sport
+    r = await client.get(f"{API}/FetchLeagueStandings", params=params, timeout=20)
+    data = r.json() if r.status_code == 200 else {}
+    teams = [_team(t) for d in data.get("divisions", []) for t in d.get("teams", []) if t.get("id") is not None]
+    return sorted(teams, key=lambda t: t.name)
+
+
 async def fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | None) -> dict[int, list[str]]:
     """Dueños de cada equipo. El draft board no siempre los trae; la clasificación y las plantillas sí."""
     params = {"league_id": league_id}
@@ -157,7 +167,15 @@ async def fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | N
 
 
 async def fetch_state(client: httpx.AsyncClient, league_id: int, sport: str | None) -> DraftState:
-    state = parse_board(await fetch_board(client, league_id, sport))
+    try:
+        state = parse_board(await fetch_board(client, league_id, sport))
+    except FleaflickerError:
+        # Liga ya en temporada sin draft board: sacamos los equipos de la clasificación.
+        owners = await fetch_owners(client, league_id, sport)
+        if not owners:
+            raise
+        teams = await _standings_teams(client, league_id, sport)
+        return DraftState(teams=teams, on_the_clock=None, picks_made=0)
     if any(not t.owners for t in state.teams):
         owners = await fetch_owners(client, league_id, sport)
         for t in state.teams:
