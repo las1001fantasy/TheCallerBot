@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Update
@@ -41,7 +43,22 @@ Gestión de la liga (commish o admins del grupo):
 /startDraft - Empieza a avisar de quién está OTC
 /stopDraft - Deja de avisar
 /setReminderDuration horas - Cada cuántas horas se recuerda quién está OTC (1-23, por defecto 2)
-/setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)"""
+/setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)
+
+De 00h a 08h (hora de España) no hay recordatorios ni avisos al commish; solo se anuncia el nuevo OTC si alguien hace un pick."""
+
+# Horas de silencio: no hay recordatorios ni avisos al commish, pero sí se anuncia un nuevo OTC si alguien hace un pick.
+TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Madrid"))
+QUIET_START = int(os.environ.get("QUIET_START", "0"))
+QUIET_END = int(os.environ.get("QUIET_END", "8"))
+
+
+def quiet_now() -> bool:
+    hour = datetime.now(TIMEZONE).hour
+    if QUIET_START <= QUIET_END:
+        return QUIET_START <= hour < QUIET_END
+    return hour >= QUIET_START or hour < QUIET_END
+
 
 OTC_TEXT = re.compile(r"who'?s on the clock|qui[eé]n est[aá] on the clock", re.IGNORECASE)
 
@@ -392,6 +409,9 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
         await send(otc_line(state, users))
         db.update_league(chat_id, thread_key, last_overall=pick.overall, otc_since=now,
                          last_reminder=now, commish_notified=0)
+        return
+
+    if quiet_now():
         return
 
     waited_h = (now - league["otc_since"]) / 3600
