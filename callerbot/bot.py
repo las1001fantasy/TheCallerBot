@@ -405,7 +405,10 @@ def main() -> None:
     interval = int(os.environ.get("CHECK_INTERVAL", "300"))
 
     app = Application.builder().token(token).post_init(on_startup).post_shutdown(on_shutdown).build()
-    app.bot_data["storage"] = Storage(os.environ.get("DB_PATH", "callerbot.db"))
+    # En Railway, si hay un volumen montado guardamos ahí la base de datos para que sobreviva a los reinicios.
+    volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    default_db = os.path.join(volume, "callerbot.db") if volume else "callerbot.db"
+    app.bot_data["storage"] = Storage(os.environ.get("DB_PATH", default_db))
 
     # python-telegram-bot compara los comandos sin distinguir mayúsculas: /setLeague == /setleague
     for name, handler in COMMANDS.items():
