@@ -113,9 +113,13 @@ async def reply(update: Update, text: str) -> None:
 
 
 async def is_manager(update: Update, league) -> bool:
-    """El commish de la liga, un admin del grupo, o cualquiera en un chat privado."""
+    """El commish de la liga, un admin del grupo, un dueño del bot, o cualquiera en un chat privado."""
     chat, user = update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
+        return True
+    # Los dueños del bot (variable BOT_OWNERS, p. ej. "@bocamolls @otro") pueden gestionar cualquier liga.
+    owners = {norm(mention(o)) for o in os.environ.get("BOT_OWNERS", "").replace(",", " ").split()}
+    if user.username and norm(f"@{user.username}") in owners:
         return True
     if league and league["commish"] and user.username and norm(league["commish"]) == norm(f"@{user.username}"):
         return True
