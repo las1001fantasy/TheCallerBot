@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -45,7 +45,7 @@ Gestión de la liga (commish o admins del grupo):
 /setReminderDuration horas - Cada cuántas horas se recuerda quién está OTC (1-23, por defecto 2)
 /setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)
 
-De 00h a 08h (hora de España) no hay recordatorios ni avisos al commish; solo se anuncia el nuevo OTC si alguien hace un pick."""
+De 00h a 08h (hora de España) el reloj del OTC se para: esas horas no cuentan, no hay recordatorios ni avisos al commish, y solo se anuncia el nuevo OTC si alguien hace un pick."""
 
 # Horas de silencio: no hay recordatorios ni avisos al commish, pero sí se anuncia un nuevo OTC si alguien hace un pick.
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Madrid"))
@@ -58,6 +58,26 @@ def quiet_now() -> bool:
     if QUIET_START <= QUIET_END:
         return QUIET_START <= hour < QUIET_END
     return hour >= QUIET_START or hour < QUIET_END
+
+
+def active_seconds(start: float, end: float) -> float:
+    """Segundos entre start y end sin contar las horas de silencio (el reloj del OTC se para de noche)."""
+    if end <= start:
+        return 0.0
+    total = end - start
+    day = datetime.fromtimestamp(start, TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    last = datetime.fromtimestamp(end, TIMEZONE)
+    while day <= last:
+        if QUIET_START <= QUIET_END:
+            windows = [(day.replace(hour=QUIET_START), day.replace(hour=QUIET_END) if QUIET_END < 24 else day + timedelta(days=1))]
+        else:
+            windows = [(day.replace(hour=QUIET_START), (day + timedelta(days=1)).replace(hour=QUIET_END))]
+        for q0, q1 in windows:
+            overlap = min(end, q1.timestamp()) - max(start, q0.timestamp())
+            if overlap > 0:
+                total -= overlap
+        day += timedelta(days=1)
+    return max(total, 0.0)
 
 
 OTC_TEXT = re.compile(r"who'?s on the clock|qui[eé]n est[aá] on the clock", re.IGNORECASE)
@@ -414,8 +434,8 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
     if quiet_now():
         return
 
-    waited_h = (now - league["otc_since"]) / 3600
-    if now - league["last_reminder"] >= league["reminder_hours"] * 3600:
+    waited_h = active_seconds(league["otc_since"], now) / 3600
+    if active_seconds(league["last_reminder"], now) >= league["reminder_hours"] * 3600:
         await send(f"{who(pick.team, users)} sigue OTC (desde hace {waited_h:.0f} h)")
         db.update_league(chat_id, thread_key, last_reminder=now)
     if not league["commish_notified"] and league["commish"] and waited_h >= league["notify_hours"]:
