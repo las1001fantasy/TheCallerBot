@@ -264,9 +264,11 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             return team, [], str(e)
 
     results = await asyncio.gather(*(one(t) for t in state.teams))
+    users = storage(ctx).users(*channel(update))
     lines, failed = [], []
     for team, issues, error in results:
-        owner = ", ".join(team.owners) or "sin dueño"
+        # El @nick de Telegram hace que al manager le llegue el aviso; si no está asociado, su usuario de Fleaflicker.
+        owner = " ".join(telegram_of(team, users)) or ", ".join(team.owners) or "sin dueño"
         if error:
             failed.append(f"{team.name}: {error}")
         elif issues:
