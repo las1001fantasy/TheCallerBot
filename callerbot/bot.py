@@ -19,33 +19,10 @@ from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_roster, fetch_state, roster_issues
+from .i18n import LANG_WORDS, t
 from .storage import Storage
 
 log = logging.getLogger("callerbot")
-
-HELP = """CallerBot avisa de quién está on the clock en los drafts de Fleaflicker.
-
-Comandos públicos:
-/ping - Comprueba que el bot está funcionando
-/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) - Asigna la liga de Fleaflicker a este canal. El leagueID es el último número de la URL de la liga, p. ej. www.fleaflicker.com/nfl/leagues/312835
-/getChannelID - Devuelve el ID del canal
-/getTeams - Lista los equipos con su usuario de Fleaflicker y de Telegram
-/whosOTC - Quién está on the clock (también vale escribir "who's on the clock")
-/getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) de titular, sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
-
-Gestión de la liga (commish o admins del grupo):
-/getLeague - Liga asignada a este canal
-/getLeagueInfo - Información de la liga y del draft
-/getMissingUsers - Usuarios de Fleaflicker sin usuario de Telegram
-/unsetLeague - Quita la liga del canal
-/setCommish @commish - Cambia el commish
-/addTelegramUsers ffUser.@telegram ffUser2.@telegram2 ... - Asocia usuarios de Fleaflicker con Telegram (sin espacios dentro de los nombres)
-/startDraft - Empieza a avisar de quién está OTC
-/stopDraft - Deja de avisar
-/setReminderDuration horas - Cada cuántas horas se recuerda quién está OTC (1-23, por defecto 2)
-/setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)
-
-De 00h a 08h (hora de España) el reloj del OTC se para: esas horas no cuentan, no hay recordatorios ni avisos al commish, y solo se anuncia el nuevo OTC si alguien hace un pick."""
 
 # Horas de silencio: no hay recordatorios ni avisos al commish, pero sí se anuncia un nuevo OTC si alguien hace un pick.
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Madrid"))
@@ -80,7 +57,7 @@ def active_seconds(start: float, end: float) -> float:
     return max(total, 0.0)
 
 
-OTC_TEXT = re.compile(r"who'?s on the clock|qui[eé]n est[aá] on the clock", re.IGNORECASE)
+OTC_TEXT = re.compile(r"who'?s on the clock|qui[eé]n est[aá] on the clock|qui est[aà] on the clock", re.IGNORECASE)
 
 
 # ---------- Utilidades ----------
@@ -127,13 +104,17 @@ async def is_manager(update: Update, league) -> bool:
     return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
 
 
+def lang_of(league) -> str:
+    return (league["lang"] if league and "lang" in league.keys() else None) or "es"
+
+
 async def require_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE, manager: bool):
     league = storage(ctx).get_league(*channel(update))
     if not league:
-        await reply(update, "No hay liga en este canal. Usa /setLeague primero.")
+        await reply(update, t("es", "no_league"))
         return None
     if manager and not await is_manager(update, league):
-        await reply(update, "Solo el commish o un admin del grupo pueden usar este comando.")
+        await reply(update, t(lang_of(league), "only_manager"))
         return None
     return league
 
@@ -153,11 +134,11 @@ def who(team: Team, users: dict[str, str]) -> str:
     return " ".join(telegram_of(team, users)) or team.name
 
 
-def otc_line(state: DraftState, users: dict[str, str]) -> str:
+def otc_line(state: DraftState, users: dict[str, str], lang: str = "es") -> str:
     pick = state.on_the_clock
     if pick is None:
-        return "El draft ha terminado."
-    return f"{who(pick.team, users)} OTC\nRonda {pick.round}, pick {pick.slot} (#{pick.overall})"
+        return t(lang, "draft_over")
+    return t(lang, "otc_line", who=who(pick.team, users), round=pick.round, slot=pick.slot, overall=pick.overall)
 
 
 def hours_arg(ctx: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -169,46 +150,45 @@ def hours_arg(ctx: ContextTypes.DEFAULT_TYPE) -> int | None:
 # ---------- Comandos públicos ----------
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await reply(update, HELP)
+    await reply(update, t(lang_of(storage(ctx).get_league(*channel(update))), "help"))
 
 
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await reply(update, "pong, estoy funcionando.")
+    await reply(update, t(lang_of(storage(ctx).get_league(*channel(update))), "ping"))
 
 
 async def cmd_getchannelid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, thread = channel(update)
-    await reply(update, f"Channel ID: {chat_id}" + (f" · Tema: {thread}" if thread else ""))
+    lang = lang_of(storage(ctx).get_league(chat_id, thread))
+    await reply(update, t(lang, "channel_id", chat_id=chat_id) + (t(lang, "topic", thread=thread) if thread else ""))
 
 
 async def cmd_setleague(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     args = ctx.args
+    # El idioma va al final (CAT = catalán); sin nada, castellano.
+    lang = next((LANG_WORDS[a.upper()] for a in args[1:] if a.upper() in LANG_WORDS), "es")
+    rest = [a for a in args[1:] if a.upper() not in LANG_WORDS]
     if not args or not args[0].isdigit():
-        await reply(update, "Uso: /setLeague leagueID @commish (opcional)")
+        await reply(update, t(lang, "setleague_usage"))
         return
     current = storage(ctx).get_league(*channel(update))
     if current and not await is_manager(update, current):
-        await reply(update, "Este canal ya tiene liga; solo el commish o un admin pueden cambiarla.")
+        await reply(update, t(lang_of(current), "already_set"))
         return
 
     league_id = int(args[0])
-    commish = mention(args[1]) if len(args) > 1 and args[1].upper() not in SPORTS else None
-    sport = next((a.upper() for a in args[1:] if a.upper() in SPORTS), None)
+    commish = mention(rest[0]) if rest and rest[0].upper() not in SPORTS else None
+    sport = next((a.upper() for a in rest if a.upper() in SPORTS), None)
     try:
         sport = sport or await detect_sport(http(ctx), league_id)
         state = await fetch_state(http(ctx), league_id, sport)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"No he podido leer la liga: {e}")
+        await reply(update, t(lang, "cant_read", error=e))
         return
 
-    storage(ctx).set_league(*channel(update), league_id, sport, commish)
-    await reply(
-        update,
-        f"Liga {league_id} ({sport}) asignada a este canal"
-        + (f", commish {commish}" if commish else "")
-        + f". {len(state.teams)} equipos.\n"
-        "Asocia los usuarios con /addTelegramUsers y empieza con /startDraft.",
-    )
+    storage(ctx).set_league(*channel(update), league_id, sport, commish, lang)
+    await reply(update, t(lang, "league_set", league_id=league_id, sport=sport, teams=len(state.teams),
+                          commish=t(lang, "commish_part", commish=commish) if commish else ""))
 
 
 async def cmd_getteams(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,14 +198,15 @@ async def cmd_getteams(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         state = await load_state(ctx, league)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        await reply(update, t(lang_of(league), "ff_error", error=e))
         return
+    lang = lang_of(league)
     users = storage(ctx).users(*channel(update))
-    lines = [f"Equipos de la liga {league['league_id']} (Fleaflicker):"]
-    for i, t in enumerate(state.teams, 1):
-        owners = ", ".join(t.owners) or "sin dueño"
-        tg = ", ".join(telegram_of(t, users)) or "sin Telegram"
-        lines.append(f"{t.slot or i}. {t.name} · {owners} · {tg}")
+    lines = [t(lang, "teams_header", league_id=league["league_id"])]
+    for i, team in enumerate(state.teams, 1):
+        owners = ", ".join(team.owners) or t(lang, "no_owner")
+        tg = ", ".join(telegram_of(team, users)) or t(lang, "no_telegram")
+        lines.append(f"{team.slot or i}. {team.name} · {owners} · {tg}")
     await reply(update, "\n".join(lines))
 
 
@@ -233,14 +214,14 @@ async def cmd_whosotc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     league = storage(ctx).get_league(*channel(update))
     if not league:
         if update.effective_message.text.startswith("/"):
-            await reply(update, "No hay liga en este canal. Usa /setLeague primero.")
+            await reply(update, t("es", "no_league"))
         return
     try:
         state = await load_state(ctx, league)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        await reply(update, t(lang_of(league), "ff_error", error=e))
         return
-    await reply(update, otc_line(state, storage(ctx).users(*channel(update))))
+    await reply(update, otc_line(state, storage(ctx).users(*channel(update)), lang_of(league)))
 
 
 async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -250,16 +231,17 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     try:
         state = await load_state(ctx, league)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        await reply(update, t(lang_of(league), "ff_error", error=e))
         return
-    await reply(update, "Revisando las plantillas, tarda unos segundos...")
+    lang = lang_of(league)
+    await reply(update, t(lang, "checking_rosters"))
 
     async def one(team: Team):
         try:
             data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
             if not data.get("groups"):
                 log.warning("FetchRoster sin 'groups' para el equipo %s: claves %s", team.id, list(data))
-            return team, roster_issues(data), None
+            return team, roster_issues(data, lang), None
         except (FleaflickerError, httpx.HTTPError, ValueError) as e:
             return team, [], str(e)
 
@@ -268,14 +250,14 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     lines, failed = [], []
     for team, issues, error in results:
         # El @nick de Telegram hace que al manager le llegue el aviso; si no está asociado, su usuario de Fleaflicker.
-        owner = " ".join(telegram_of(team, users)) or ", ".join(team.owners) or "sin dueño"
+        owner = " ".join(telegram_of(team, users)) or ", ".join(team.owners) or t(lang, "no_owner")
         if error:
             failed.append(f"{team.name}: {error}")
         elif issues:
             lines.append(f"• {team.name} ({owner}):\n  - " + "\n  - ".join(issues))
-    text = "\n".join(["Plantillas con incidencias:", *lines]) if lines else "Todas las plantillas están en regla."
+    text = "\n".join([t(lang, "rosters_header"), *lines]) if lines else t(lang, "rosters_ok")
     if failed:
-        text += "\n\nNo he podido revisar:\n" + "\n".join(failed)
+        text += "\n\n" + t(lang, "rosters_failed") + "\n" + "\n".join(failed)
     await reply(update, text)
 
 
@@ -284,7 +266,7 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 async def cmd_getleague(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     league = await require_league(update, ctx, manager=False)
     if league:
-        await reply(update, f"Liga {league['league_id']} ({league['sport']})")
+        await reply(update, t(lang_of(league), "league_short", league_id=league["league_id"], sport=league["sport"]))
 
 
 async def cmd_getleagueinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -294,19 +276,18 @@ async def cmd_getleagueinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     try:
         state = await load_state(ctx, league)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        await reply(update, t(lang_of(league), "ff_error", error=e))
         return
+    lang = lang_of(league)
     users = storage(ctx).users(*channel(update))
-    otc = f"{who(state.on_the_clock.team, users)} (#{state.on_the_clock.overall})" if state.on_the_clock else "draft terminado"
-    await reply(
-        update,
-        f"Liga {league['league_id']} ({league['sport']})\n"
-        f"Commish: {league['commish'] or 'sin asignar'}\n"
-        f"Equipos: {len(state.teams)} · Picks hechos: {state.picks_made}\n"
-        f"OTC: {otc}\n"
-        f"Avisos: {'activados' if league['drafting'] else 'parados'} · "
-        f"recordatorio cada {league['reminder_hours']} h · commish a las {league['notify_hours']} h",
-    )
+    pick = state.on_the_clock
+    otc = f"{who(pick.team, users)} (#{pick.overall})" if pick else t(lang, "draft_finished_short")
+    await reply(update, t(
+        lang, "league_info", league_id=league["league_id"], sport=league["sport"],
+        commish=league["commish"] or t(lang, "unassigned"), teams=len(state.teams), picks=state.picks_made,
+        otc=otc, alerts=t(lang, "alerts_on" if league["drafting"] else "alerts_off"),
+        reminder=league["reminder_hours"], notify=league["notify_hours"],
+    ))
 
 
 async def cmd_getmissingusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,17 +297,18 @@ async def cmd_getmissingusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     try:
         state = await load_state(ctx, league)
     except (FleaflickerError, httpx.HTTPError) as e:
-        await reply(update, f"Error leyendo Fleaflicker: {e}")
+        await reply(update, t(lang_of(league), "ff_error", error=e))
         return
     users = storage(ctx).users(*channel(update))
     missing = [f"{o} ({t.name})" for t in state.teams for o in t.owners if norm(o) not in users]
     orphan = [t.name for t in state.teams if not t.owners and norm(t.name) not in users]
+    lang = lang_of(league)
     if not missing and not orphan:
-        await reply(update, "Todos los usuarios de Fleaflicker tienen Telegram asociado.")
+        await reply(update, t(lang, "all_mapped"))
         return
-    lines = ["Sin usuario de Telegram:", *missing] if missing else []
+    lines = [t(lang, "missing_header"), *missing] if missing else []
     if orphan:
-        lines += ["Equipos sin dueño en Fleaflicker (asócialos por nombre, sin espacios: NombreEquipo.@telegram):", *orphan]
+        lines += [t(lang, "orphan_header"), *orphan]
     await reply(update, "\n".join(lines))
 
 
@@ -334,7 +316,7 @@ async def cmd_unsetleague(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     league = await require_league(update, ctx, manager=True)
     if league:
         storage(ctx).unset_league(*channel(update))
-        await reply(update, f"Liga {league['league_id']} quitada de este canal.")
+        await reply(update, t(lang_of(league), "unset", league_id=league["league_id"]))
 
 
 async def cmd_setcommish(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -342,11 +324,11 @@ async def cmd_setcommish(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not league:
         return
     if len(ctx.args) != 1:
-        await reply(update, "Uso: /setCommish @commish")
+        await reply(update, t(lang_of(league), "setcommish_usage"))
         return
     commish = mention(ctx.args[0])
     storage(ctx).update_league(*channel(update), commish=commish)
-    await reply(update, f"Commish: {commish}")
+    await reply(update, t(lang_of(league), "commish_set", commish=commish))
 
 
 async def cmd_addtelegramusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -366,9 +348,10 @@ async def cmd_addtelegramusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         storage(ctx).add_user(*channel(update), norm(ff), tg)
         added.append(f"{ff} → {tg}")
     if not added and not bad:
-        await reply(update, "Uso: /addTelegramUsers ffUser.@telegram ffUser2.@telegram2 ...")
+        await reply(update, t(lang_of(league), "add_usage"))
         return
-    lines = (["Añadidos:", *added] if added else []) + (["No entiendo:", *bad] if bad else [])
+    lang = lang_of(league)
+    lines = ([t(lang, "added"), *added] if added else []) + ([t(lang, "not_understood"), *bad] if bad else [])
     await reply(update, "\n".join(lines))
 
 
@@ -377,7 +360,7 @@ async def cmd_startdraft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not league:
         return
     storage(ctx).update_league(*channel(update), drafting=1, last_overall=None, commish_notified=0)
-    await reply(update, "Draft en marcha. Avisaré en este canal cada vez que cambie el OTC.")
+    await reply(update, t(lang_of(league), "draft_started"))
     await check_league(ctx, storage(ctx).get_league(*channel(update)))
 
 
@@ -385,7 +368,7 @@ async def cmd_stopdraft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     league = await require_league(update, ctx, manager=True)
     if league:
         storage(ctx).update_league(*channel(update), drafting=0)
-        await reply(update, "Avisos de OTC parados. /startDraft para reanudarlos.")
+        await reply(update, t(lang_of(league), "draft_stopped"))
 
 
 async def cmd_setreminderduration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -394,10 +377,10 @@ async def cmd_setreminderduration(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         return
     hours = hours_arg(ctx)
     if hours is None:
-        await reply(update, "Uso: /setReminderDuration horas (1-23)")
+        await reply(update, t(lang_of(league), "reminder_usage"))
         return
     storage(ctx).update_league(*channel(update), reminder_hours=hours)
-    await reply(update, f"Recordaré quién está OTC cada {hours} h.")
+    await reply(update, t(lang_of(league), "reminder_set", hours=hours))
 
 
 async def cmd_setnotificationduration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -406,10 +389,10 @@ async def cmd_setnotificationduration(update: Update, ctx: ContextTypes.DEFAULT_
         return
     hours = hours_arg(ctx)
     if hours is None:
-        await reply(update, "Uso: /setNotificationDuration horas (1-23)")
+        await reply(update, t(lang_of(league), "notify_usage"))
         return
     storage(ctx).update_league(*channel(update), notify_hours=hours)
-    await reply(update, f"Avisaré al commish cuando alguien lleve {hours} h OTC.")
+    await reply(update, t(lang_of(league), "notify_set", hours=hours))
 
 
 # ---------- Chequeo periódico ----------
@@ -422,17 +405,18 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
     async def send(text: str) -> None:
         await ctx.bot.send_message(chat_id, text, message_thread_id=thread_key or None)
 
+    lang = lang_of(league)
     state = await load_state(ctx, league)
     users = db.users(chat_id, thread_key)
     pick, now = state.on_the_clock, time.time()
 
     if pick is None:
-        await send("El draft ha terminado. ¡Suerte a todos!")
+        await send(t(lang, "draft_finished"))
         db.update_league(chat_id, thread_key, drafting=0, last_overall=None)
         return
 
     if league["last_overall"] != pick.overall:
-        await send(otc_line(state, users))
+        await send(otc_line(state, users, lang))
         db.update_league(chat_id, thread_key, last_overall=pick.overall, otc_since=now,
                          last_reminder=now, commish_notified=0)
         return
@@ -442,10 +426,10 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
 
     waited_h = active_seconds(league["otc_since"], now) / 3600
     if active_seconds(league["last_reminder"], now) >= league["reminder_hours"] * 3600:
-        await send(f"{who(pick.team, users)} sigue OTC (desde hace {waited_h:.0f} h)")
+        await send(t(lang, "still_otc", who=who(pick.team, users), hours=waited_h))
         db.update_league(chat_id, thread_key, last_reminder=now)
     if not league["commish_notified"] and league["commish"] and waited_h >= league["notify_hours"]:
-        await send(f"{league['commish']}: {pick.team.name} lleva {waited_h:.0f} h OTC.")
+        await send(t(lang, "commish_alert", commish=league["commish"], team=pick.team.name, hours=waited_h))
         db.update_league(chat_id, thread_key, commish_notified=1)
 
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .i18n import t
+
 API = "https://www.fleaflicker.com/api"
 SPORTS = ("NFL", "NBA", "NHL", "MLB")
 
@@ -229,7 +231,7 @@ def _is_rookie(pro: dict) -> bool | None:
     return None  # no sabemos
 
 
-def roster_issues(data: dict) -> list[str]:
+def roster_issues(data: dict, lang: str = "es") -> list[str]:
     """Problemas de una plantilla: lesionados de titular, sanos en IR, no rookies en TAXI, huecos vacíos."""
     issues: list[str] = []
     for group in data.get("groups", []):
@@ -245,14 +247,14 @@ def roster_issues(data: dict) -> list[str]:
             in_taxi = gname == "TAXI" or label == "TAXI"
             if not pro:
                 if starter:
-                    issues.append(f"hueco vacío en {where}")
+                    issues.append(t(lang, "issue_empty", where=where))
                 continue
             name = pro.get("nameFull") or pro.get("nameShort") or "?"
             status = _status(pro)
             if starter and status in BAD_STATUS:
-                issues.append(f"{name} ({status}) de titular en {where}")
+                issues.append(t(lang, "issue_injured_starter", name=name, status=status, where=where))
             elif in_ir and status in OK_STATUS:
-                issues.append(f"{name} está sano{f' ({status})' if status else ''} y ocupa un hueco de IR")
+                issues.append(t(lang, "issue_healthy_ir", name=name, status=f" ({status})" if status else ""))
             elif in_taxi and _is_rookie(pro) is False:
-                issues.append(f"{name} no es rookie y está en TAXI")
+                issues.append(t(lang, "issue_taxi", name=name))
     return issues

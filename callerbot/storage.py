@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS leagues (
     commish_notified INTEGER NOT NULL DEFAULT 0,
     reminder_hours   INTEGER NOT NULL DEFAULT 2,
     notify_hours     INTEGER NOT NULL DEFAULT 8,
+    lang             TEXT    NOT NULL DEFAULT 'es',  -- idioma de las respuestas: es o ca
     PRIMARY KEY (chat_id, thread_key)
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 LEAGUE_FIELDS = {
     "commish", "drafting", "last_overall", "otc_since", "last_reminder",
-    "commish_notified", "reminder_hours", "notify_hours",
+    "commish_notified", "reminder_hours", "notify_hours", "lang",
 }
 
 
@@ -41,19 +42,25 @@ class Storage:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        # Bases de datos creadas antes de que existiera el idioma.
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(leagues)")}
+        if "lang" not in cols:
+            self.db.execute("ALTER TABLE leagues ADD COLUMN lang TEXT NOT NULL DEFAULT 'es'")
+            self.db.commit()
 
     def get_league(self, chat_id: int, thread_key: int) -> sqlite3.Row | None:
         return self.db.execute(
             "SELECT * FROM leagues WHERE chat_id = ? AND thread_key = ?", (chat_id, thread_key)
         ).fetchone()
 
-    def set_league(self, chat_id: int, thread_key: int, league_id: int, sport: str, commish: str | None) -> None:
+    def set_league(self, chat_id: int, thread_key: int, league_id: int, sport: str, commish: str | None,
+                   lang: str = "es") -> None:
         self.db.execute(
             "DELETE FROM leagues WHERE chat_id = ? AND thread_key = ?", (chat_id, thread_key)
         )
         self.db.execute(
-            "INSERT INTO leagues (chat_id, thread_key, league_id, sport, commish) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, thread_key, league_id, sport, commish),
+            "INSERT INTO leagues (chat_id, thread_key, league_id, sport, commish, lang) VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, thread_key, league_id, sport, commish, lang),
         )
         self.db.commit()
 
