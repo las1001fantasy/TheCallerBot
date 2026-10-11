@@ -94,6 +94,10 @@ async def is_manager(update: Update, league) -> bool:
     chat, user = update.effective_chat, update.effective_user
     if chat.type == ChatType.PRIVATE:
         return True
+    # Un admin anónimo escribe "como el grupo": Telegram pone el propio grupo como remitente y solo los admins pueden hacerlo.
+    msg = update.effective_message
+    if msg and msg.sender_chat and msg.sender_chat.id == chat.id:
+        return True
     # Los dueños del bot (variable BOT_OWNERS, p. ej. "@bocamolls @otro") pueden gestionar cualquier liga.
     owners = {norm(mention(o)) for o in os.environ.get("BOT_OWNERS", "").replace(",", " ").split()}
     if user.username and norm(f"@{user.username}") in owners:
