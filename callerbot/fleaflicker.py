@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -150,7 +151,23 @@ async def _standings_teams(client: httpx.AsyncClient, league_id: int, sport: str
     return sorted(teams, key=lambda t: t.name)
 
 
+# Los dueños de los equipos casi nunca cambian: los guardamos unas horas para no pedirlos en cada revisión.
+OWNERS_TTL = 6 * 3600
+_owners_cache: dict[tuple[int, str | None], tuple[float, dict[int, list[str]]]] = {}
+
+
 async def fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | None) -> dict[int, list[str]]:
+    key = (league_id, sport)
+    cached = _owners_cache.get(key)
+    if cached and time.time() - cached[0] < OWNERS_TTL:
+        return cached[1]
+    owners = await _fetch_owners(client, league_id, sport)
+    if owners:
+        _owners_cache[key] = (time.time(), owners)
+    return owners
+
+
+async def _fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | None) -> dict[int, list[str]]:
     """Dueños de cada equipo. El draft board no siempre los trae; la clasificación y las plantillas sí."""
     params = {"league_id": league_id}
     if sport:

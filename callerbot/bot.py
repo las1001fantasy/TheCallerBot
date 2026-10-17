@@ -545,12 +545,21 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
         db.update_league(chat_id, thread_key, commish_notified=1)
 
 
+# Cuántas ligas se revisan a la vez: rápido con muchas ligas sin saturar a Fleaflicker.
+PARALLEL_CHECKS = int(os.environ.get("PARALLEL_CHECKS", "8"))
+
+
 async def check_all(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    for league in storage(ctx).drafting_leagues():
-        try:
-            await check_league(ctx, league)
-        except Exception:
-            log.exception("Error revisando liga %s en chat %s", league["league_id"], league["chat_id"])
+    sem = asyncio.Semaphore(PARALLEL_CHECKS)
+
+    async def one(league) -> None:
+        async with sem:
+            try:
+                await check_league(ctx, league)
+            except Exception:
+                log.exception("Error revisando liga %s en chat %s", league["league_id"], league["chat_id"])
+
+    await asyncio.gather(*(one(league) for league in storage(ctx).drafting_leagues()))
 
 
 # ---------- Arranque ----------
