@@ -457,8 +457,12 @@ async def cmd_getscoreboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         await reply(update, t(lang_of(league), "ff_error", error=e))
 
 
+REPORT_DAY = 1    # martes (lunes = 0)
+REPORT_HOUR = 12
+
+
 def report_when(league) -> str:
-    return t(lang_of(league), "when_nfl" if league["sport"] == "NFL" else "when_other")
+    return t(lang_of(league), "when_report")
 
 
 def _toggle(field: str, value: int, key: str):
@@ -477,14 +481,13 @@ cmd_disablescoreboard = _toggle("scoreboard_weekly", 0, "scoreboard_off")
 
 
 async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Martes 10h (NFL) o lunes 10h (resto), hora de España: resultados de la jornada pasada y clasificación."""
+    """Martes a las 12h (hora de España): resultados de la jornada pasada y clasificación."""
     now = datetime.now(TIMEZONE)
     year, isoweek, _ = now.isocalendar()
     tag = f"{year}-W{isoweek:02d}"
     db = storage(ctx)
     for league in db.report_leagues():
-        day = 1 if league["sport"] == "NFL" else 0  # lunes = 0
-        if now.weekday() != day or now.hour < 10 or league["last_report"] == tag:
+        if now.weekday() != REPORT_DAY or now.hour < REPORT_HOUR or league["last_report"] == tag:
             continue
         chat_id, thread_key = league["chat_id"], league["thread_key"]
         lang = lang_of(league)

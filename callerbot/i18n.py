@@ -31,7 +31,7 @@ Gestión de la liga (commish o admins del grupo):
 /setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)
 /enableStandingNotification y /disableStandingNotification - Activa o quita la clasificación semanal
 /enableScoreboardNotification y /disableScoreboardNotification - Activa o quita los resultados semanales
-Los informes semanales salen el martes a las 10h en la NFL y el lunes a las 10h en NBA, NHL y MLB.
+Los informes semanales salen el martes a las 12h (hora de España).
 
 De 00h a 08h (hora de España) el reloj del OTC se para: esas horas no cuentan, no hay recordatorios ni avisos al commish, y solo se anuncia el nuevo OTC si alguien hace un pick."""
 
@@ -60,7 +60,7 @@ Gestió de la lliga (commish o admins del grup):
 /setNotificationDuration hores - A les quantes hores d'OTC s'avisa el commish (1-23, per defecte 8)
 /enableStandingNotification i /disableStandingNotification - Activa o treu la classificació setmanal
 /enableScoreboardNotification i /disableScoreboardNotification - Activa o treu els resultats setmanals
-Els informes setmanals surten dimarts a les 10h a la NFL i dilluns a les 10h a NBA, NHL i MLB.
+Els informes setmanals surten dimarts a les 12h (hora d'Espanya).
 
 De 00h a 08h (hora d'Espanya) el rellotge de l'OTC s'atura: aquestes hores no compten, no hi ha recordatoris ni avisos al commish, i només s'anuncia el nou OTC si algú fa un pick."""
 
@@ -126,8 +126,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "standings_off": "Clasificación semanal desactivada.",
         "scoreboard_on": "Resultados semanales activados ({when}).",
         "scoreboard_off": "Resultados semanales desactivados.",
-        "when_nfl": "martes a las 10h",
-        "when_other": "lunes a las 10h",
+        "when_report": "martes a las 12h",
         "weekly_title": "📊 Informe semanal",
     },
     "ca": {
@@ -191,8 +190,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "standings_off": "Classificació setmanal desactivada.",
         "scoreboard_on": "Resultats setmanals activats ({when}).",
         "scoreboard_off": "Resultats setmanals desactivats.",
-        "when_nfl": "dimarts a les 10h",
-        "when_other": "dilluns a les 10h",
+        "when_report": "dimarts a les 12h",
         "weekly_title": "📊 Informe setmanal",
     },
 }
