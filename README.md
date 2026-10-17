@@ -19,7 +19,7 @@ En BotFather, ejecuta `/setprivacy` → *Disable* para que el bot lea el texto "
 Cada canal (un grupo, o cada tema de un grupo con temas) tiene su propia liga. Los comandos son los mismos que los del bot anterior y no distinguen mayúsculas.
 
 1. Añade el bot al grupo.
-2. En el tema de la liga: `/setLeague 312835 @commish` (el deporte se detecta solo; puedes añadir `NFL`, `NBA`, `NHL` o `MLB`, y `CAT` al final para que el bot responda en catalán en ese tema).
+2. En el tema de la liga: `/setLeague 123456 @commish` (el deporte se detecta solo; puedes añadir `NFL`, `NBA`, `NHL` o `MLB`, y `CAT` al final para que el bot responda en catalán en ese tema).
 3. `/addTelegramUsers ffUser.@telegram ffUser2.@telegram2` y `/getMissingUsers` para ver quién falta.
 4. `/startDraft`. Desde ahí avisa "@nick OTC" en cada cambio de turno, lo recuerda cada 2 h (`/setReminderDuration`) y avisa al commish a las 8 h (`/setNotificationDuration`). `/stopDraft` lo para.
 5. `/whosOTC` o escribir "who's on the clock" en cualquier momento.

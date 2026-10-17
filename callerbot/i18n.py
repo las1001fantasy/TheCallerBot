@@ -10,11 +10,13 @@ HELP_ES = """CallerBot avisa de quién está on the clock en los drafts de Fleaf
 
 Comandos públicos:
 /ping - Comprueba que el bot está funcionando
-/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) CAT (opcional) - Asigna la liga de Fleaflicker a este canal. El leagueID es el último número de la URL de la liga, p. ej. www.fleaflicker.com/nfl/leagues/312835. Con CAT al final, el bot responde en catalán en este canal
+/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) CAT (opcional) - Asigna la liga de Fleaflicker a este canal. El leagueID es el último número de la URL de la liga, p. ej. fleaflicker.com/nfl/leagues/123456. Con CAT al final, el bot responde en catalán en este canal
 /getChannelID - Devuelve el ID del canal
 /getTeams - Lista los equipos con su usuario de Fleaflicker y de Telegram
 /whosOTC - Quién está on the clock (también vale escribir "who's on the clock")
 /getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) de titular, sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
+/getLeagueStanding - Clasificación de la liga
+/getScoreBoard (jornada) - Resultados de la jornada actual, o de la que indiques (ligas H2H)
 
 Gestión de la liga (commish o admins del grupo):
 /getLeague - Liga asignada a este canal
@@ -27,6 +29,9 @@ Gestión de la liga (commish o admins del grupo):
 /stopDraft - Deja de avisar
 /setReminderDuration horas - Cada cuántas horas se recuerda quién está OTC (1-23, por defecto 2)
 /setNotificationDuration horas - A las cuántas horas de OTC se avisa al commish (1-23, por defecto 8)
+/enableStandingNotification y /disableStandingNotification - Activa o quita la clasificación semanal
+/enableScoreboardNotification y /disableScoreboardNotification - Activa o quita los resultados semanales
+Los informes semanales salen el martes a las 10h en la NFL y el lunes a las 10h en NBA, NHL y MLB.
 
 De 00h a 08h (hora de España) el reloj del OTC se para: esas horas no cuentan, no hay recordatorios ni avisos al commish, y solo se anuncia el nuevo OTC si alguien hace un pick."""
 
@@ -34,11 +39,13 @@ HELP_CA = """CallerBot avisa de qui està on the clock als drafts de Fleaflicker
 
 Ordres públiques:
 /ping - Comprova que el bot funciona
-/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) CAT (opcional) - Assigna la lliga de Fleaflicker a aquest canal. El leagueID és l'últim número de l'URL de la lliga, p. ex. www.fleaflicker.com/nfl/leagues/312835. Amb CAT al final, el bot respon en català en aquest canal
+/setLeague leagueID @commish (opcional) NFL|NBA|NHL|MLB (opcional) CAT (opcional) - Assigna la lliga de Fleaflicker a aquest canal. El leagueID és l'últim número de l'URL de la lliga, p. ex. fleaflicker.com/nfl/leagues/123456. Amb CAT al final, el bot respon en català en aquest canal
 /getChannelID - Retorna l'ID del canal
 /getTeams - Llista els equips amb el seu usuari de Fleaflicker i de Telegram
 /whosOTC - Qui està on the clock (també val escriure "who's on the clock")
 /getIllegalRosters - Revisa les plantilles: lesionats (OUT, IR, PUP, EX...) de titular, sans a l'IR, no rookies al TAXI i forats buits (les Q no s'avisen)
+/getLeagueStanding - Classificació de la lliga
+/getScoreBoard (jornada) - Resultats de la jornada actual, o de la que indiquis (lligues H2H)
 
 Gestió de la lliga (commish o admins del grup):
 /getLeague - Lliga assignada a aquest canal
@@ -51,6 +58,9 @@ Gestió de la lliga (commish o admins del grup):
 /stopDraft - Deixa d'avisar
 /setReminderDuration hores - Cada quantes hores es recorda qui està OTC (1-23, per defecte 2)
 /setNotificationDuration hores - A les quantes hores d'OTC s'avisa el commish (1-23, per defecte 8)
+/enableStandingNotification i /disableStandingNotification - Activa o treu la classificació setmanal
+/enableScoreboardNotification i /disableScoreboardNotification - Activa o treu els resultats setmanals
+Els informes setmanals surten dimarts a les 10h a la NFL i dilluns a les 10h a NBA, NHL i MLB.
 
 De 00h a 08h (hora d'Espanya) el rellotge de l'OTC s'atura: aquestes hores no compten, no hi ha recordatoris ni avisos al commish, i només s'anuncia el nou OTC si algú fa un pick."""
 
@@ -107,6 +117,18 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_injured_starter": "{name} ({status}) de titular en {where}",
         "issue_healthy_ir": "{name} está sano{status} y ocupa un hueco de IR",
         "issue_taxi": "{name} no es rookie y está en TAXI",
+        "standings_header": "Clasificación de la liga {league_id}:",
+        "scoreboard_header": "Resultados de la jornada {week}:",
+        "scoreboard_header_noweek": "Resultados de la jornada:",
+        "in_progress": "en juego",
+        "scoreboard_usage": "Uso: /getScoreBoard (jornada opcional, p. ej. /getScoreBoard 5)",
+        "standings_on": "Clasificación semanal activada ({when}).",
+        "standings_off": "Clasificación semanal desactivada.",
+        "scoreboard_on": "Resultados semanales activados ({when}).",
+        "scoreboard_off": "Resultados semanales desactivados.",
+        "when_nfl": "martes a las 10h",
+        "when_other": "lunes a las 10h",
+        "weekly_title": "📊 Informe semanal",
     },
     "ca": {
         "help": HELP_CA,
@@ -160,6 +182,18 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_injured_starter": "{name} ({status}) de titular a {where}",
         "issue_healthy_ir": "{name} està sa{status} i ocupa un forat d'IR",
         "issue_taxi": "{name} no és rookie i està al TAXI",
+        "standings_header": "Classificació de la lliga {league_id}:",
+        "scoreboard_header": "Resultats de la jornada {week}:",
+        "scoreboard_header_noweek": "Resultats de la jornada:",
+        "in_progress": "en joc",
+        "scoreboard_usage": "Ús: /getScoreBoard (jornada opcional, p. ex. /getScoreBoard 5)",
+        "standings_on": "Classificació setmanal activada ({when}).",
+        "standings_off": "Classificació setmanal desactivada.",
+        "scoreboard_on": "Resultats setmanals activats ({when}).",
+        "scoreboard_off": "Resultats setmanals desactivats.",
+        "when_nfl": "dimarts a les 10h",
+        "when_other": "dilluns a les 10h",
+        "weekly_title": "📊 Informe setmanal",
     },
 }
 

@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     reminder_hours   INTEGER NOT NULL DEFAULT 2,
     notify_hours     INTEGER NOT NULL DEFAULT 8,
     lang             TEXT    NOT NULL DEFAULT 'es',  -- idioma de las respuestas: es o ca
+    standings_weekly INTEGER NOT NULL DEFAULT 0,     -- informe semanal de clasificación
+    scoreboard_weekly INTEGER NOT NULL DEFAULT 0,    -- informe semanal de resultados
+    last_report      TEXT,                           -- semana ISO del último informe enviado
     PRIMARY KEY (chat_id, thread_key)
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -34,6 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
 LEAGUE_FIELDS = {
     "commish", "drafting", "last_overall", "otc_since", "last_reminder",
     "commish_notified", "reminder_hours", "notify_hours", "lang",
+    "standings_weekly", "scoreboard_weekly", "last_report",
 }
 
 
@@ -42,11 +46,15 @@ class Storage:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        # Bases de datos creadas antes de que existiera el idioma.
+        # Bases de datos creadas con una versión anterior: añadimos las columnas que falten.
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(leagues)")}
-        if "lang" not in cols:
-            self.db.execute("ALTER TABLE leagues ADD COLUMN lang TEXT NOT NULL DEFAULT 'es'")
-            self.db.commit()
+        for col, ddl in (("lang", "TEXT NOT NULL DEFAULT 'es'"),
+                         ("standings_weekly", "INTEGER NOT NULL DEFAULT 0"),
+                         ("scoreboard_weekly", "INTEGER NOT NULL DEFAULT 0"),
+                         ("last_report", "TEXT")):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE leagues ADD COLUMN {col} {ddl}")
+        self.db.commit()
 
     def get_league(self, chat_id: int, thread_key: int) -> sqlite3.Row | None:
         return self.db.execute(
@@ -77,6 +85,11 @@ class Storage:
         for table in ("leagues", "users"):
             self.db.execute(f"DELETE FROM {table} WHERE chat_id = ? AND thread_key = ?", (chat_id, thread_key))
         self.db.commit()
+
+    def report_leagues(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM leagues WHERE standings_weekly = 1 OR scoreboard_weekly = 1"
+        ).fetchall()
 
     def drafting_leagues(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM leagues WHERE drafting = 1").fetchall()

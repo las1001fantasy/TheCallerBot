@@ -14,11 +14,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
-from telegram import Update
+from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .fleaflicker import SPORTS, DraftState, FleaflickerError, Team, detect_sport, fetch_roster, fetch_state, roster_issues
+from .fleaflicker import (
+    SPORTS, DraftState, FleaflickerError, Team, _fmt, detect_sport, fetch_roster, fetch_scoreboard, fetch_standings,
+    fetch_state, roster_issues,
+)
 from .i18n import LANG_WORDS, t
 from .storage import Storage
 
@@ -85,8 +88,11 @@ def mention(nick: str) -> str:
     return nick if nick.startswith("@") or " " in nick else f"@{nick}"
 
 
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+
 async def reply(update: Update, text: str) -> None:
-    await update.effective_message.reply_text(text, do_quote=False)
+    await update.effective_message.reply_text(text, do_quote=False, link_preview_options=NO_PREVIEW)
 
 
 async def is_manager(update: Update, league) -> bool:
@@ -399,6 +405,105 @@ async def cmd_setnotificationduration(update: Update, ctx: ContextTypes.DEFAULT_
     await reply(update, t(lang_of(league), "notify_set", hours=hours))
 
 
+# ---------- Clasificación y resultados ----------
+
+async def standings_text(ctx: ContextTypes.DEFAULT_TYPE, league) -> str:
+    lang = lang_of(league)
+    rows = await fetch_standings(http(ctx), league["league_id"], league["sport"])
+    lines = [t(lang, "standings_header", league_id=league["league_id"])]
+    division = None
+    multi = len({r.division for r in rows}) > 1
+    for i, r in enumerate(sorted(rows, key=lambda r: (r.division, r.rank or 999)) if multi else rows, 1):
+        if multi and r.division != division:
+            division = r.division
+            lines.append(f"\n{division}")
+        record = f"{r.wins}-{r.losses}" + (f"-{r.ties}" if r.ties else "")
+        lines.append(f"{r.rank or i}. {r.team.name} · {record} · PF {_fmt(r.points_for)} · PA {_fmt(r.points_against)}")
+    return "\n".join(lines)
+
+
+async def scoreboard_text(ctx: ContextTypes.DEFAULT_TYPE, league, week: int | None = None) -> str:
+    lang = lang_of(league)
+    board = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"], week)
+    header = t(lang, "scoreboard_header", week=board.week) if board.week else t(lang, "scoreboard_header_noweek")
+    lines = [header]
+    for g in board.games:
+        status = "" if g.final else f" ({t(lang, 'in_progress')})"
+        lines.append(f"{g.away.name} {_fmt(g.away_score)} - {_fmt(g.home_score)} {g.home.name}{status}")
+    return "\n".join(lines)
+
+
+async def cmd_getleaguestanding(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    league = await require_league(update, ctx, manager=False)
+    if not league:
+        return
+    try:
+        await reply(update, await standings_text(ctx, league))
+    except (FleaflickerError, httpx.HTTPError, ValueError) as e:
+        await reply(update, t(lang_of(league), "ff_error", error=e))
+
+
+async def cmd_getscoreboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    league = await require_league(update, ctx, manager=False)
+    if not league:
+        return
+    if ctx.args and not ctx.args[0].isdigit():
+        await reply(update, t(lang_of(league), "scoreboard_usage"))
+        return
+    week = int(ctx.args[0]) if ctx.args else None
+    try:
+        await reply(update, await scoreboard_text(ctx, league, week))
+    except (FleaflickerError, httpx.HTTPError, ValueError) as e:
+        await reply(update, t(lang_of(league), "ff_error", error=e))
+
+
+def report_when(league) -> str:
+    return t(lang_of(league), "when_nfl" if league["sport"] == "NFL" else "when_other")
+
+
+def _toggle(field: str, value: int, key: str):
+    async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        league = await require_league(update, ctx, manager=True)
+        if league:
+            storage(ctx).update_league(*channel(update), **{field: value})
+            await reply(update, t(lang_of(league), key, when=report_when(league)))
+    return handler
+
+
+cmd_enablestanding = _toggle("standings_weekly", 1, "standings_on")
+cmd_disablestanding = _toggle("standings_weekly", 0, "standings_off")
+cmd_enablescoreboard = _toggle("scoreboard_weekly", 1, "scoreboard_on")
+cmd_disablescoreboard = _toggle("scoreboard_weekly", 0, "scoreboard_off")
+
+
+async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Martes 10h (NFL) o lunes 10h (resto), hora de España: resultados de la jornada pasada y clasificación."""
+    now = datetime.now(TIMEZONE)
+    year, isoweek, _ = now.isocalendar()
+    tag = f"{year}-W{isoweek:02d}"
+    db = storage(ctx)
+    for league in db.report_leagues():
+        day = 1 if league["sport"] == "NFL" else 0  # lunes = 0
+        if now.weekday() != day or now.hour < 10 or league["last_report"] == tag:
+            continue
+        chat_id, thread_key = league["chat_id"], league["thread_key"]
+        lang = lang_of(league)
+        parts = [t(lang, "weekly_title")]
+        try:
+            if league["scoreboard_weekly"]:
+                current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
+                last_week = (current.week - 1) if current.week and current.week > 1 else None
+                parts.append(await scoreboard_text(ctx, league, last_week))
+            if league["standings_weekly"]:
+                parts.append(await standings_text(ctx, league))
+        except Exception:
+            log.exception("Error en el informe semanal de la liga %s", league["league_id"])
+            continue
+        await ctx.bot.send_message(chat_id, "\n\n".join(parts), message_thread_id=thread_key or None,
+                                   link_preview_options=NO_PREVIEW)
+        db.update_league(chat_id, thread_key, last_report=tag)
+
+
 # ---------- Chequeo periódico ----------
 
 async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
@@ -407,7 +512,7 @@ async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
     db = storage(ctx)
 
     async def send(text: str) -> None:
-        await ctx.bot.send_message(chat_id, text, message_thread_id=thread_key or None)
+        await ctx.bot.send_message(chat_id, text, message_thread_id=thread_key or None, link_preview_options=NO_PREVIEW)
 
     lang = lang_of(league)
     state = await load_state(ctx, league)
@@ -454,6 +559,9 @@ COMMANDS = {
     "getmissingusers": cmd_getmissingusers, "unsetleague": cmd_unsetleague, "setcommish": cmd_setcommish,
     "addtelegramusers": cmd_addtelegramusers, "startdraft": cmd_startdraft, "stopdraft": cmd_stopdraft,
     "getillegalrosters": cmd_getillegalrosters,
+    "getleaguestanding": cmd_getleaguestanding, "getscoreboard": cmd_getscoreboard,
+    "enablestandingnotification": cmd_enablestanding, "disablestandingnotification": cmd_disablestanding,
+    "enablescoreboardnotification": cmd_enablescoreboard, "disablescoreboardnotification": cmd_disablescoreboard,
     "setreminderduration": cmd_setreminderduration, "setnotificationduration": cmd_setnotificationduration,
 }
 
@@ -491,6 +599,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(OTC_TEXT), cmd_whosotc))
 
     app.job_queue.run_repeating(check_all, interval=interval, first=10)
+    app.job_queue.run_repeating(weekly_reports, interval=900, first=60)
     log.info("CallerBot arrancado; revisando drafts cada %ss", interval)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

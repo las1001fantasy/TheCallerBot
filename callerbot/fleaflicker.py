@@ -258,3 +258,107 @@ def roster_issues(data: dict, lang: str = "es") -> list[str]:
             elif in_taxi and _is_rookie(pro) is False:
                 issues.append(t(lang, "issue_taxi", name=name))
     return issues
+
+
+# ---------- Clasificación y resultados ----------
+
+def _num(obj) -> float | None:
+    """Fleaflicker da los números como {"value": 12.3, "formatted": "12.3"} o directamente."""
+    if isinstance(obj, dict):
+        obj = obj.get("value", obj.get("formatted"))
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt(x: float | None) -> str:
+    if x is None:
+        return "-"
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+@dataclass
+class StandingRow:
+    rank: int
+    team: Team
+    wins: int
+    losses: int
+    ties: int
+    points_for: float | None
+    points_against: float | None
+    division: str
+
+
+async def fetch_standings(client: httpx.AsyncClient, league_id: int, sport: str | None) -> list[StandingRow]:
+    params = {"league_id": league_id}
+    if sport:
+        params["sport"] = sport
+    r = await client.get(f"{API}/FetchLeagueStandings", params=params, timeout=20)
+    if r.status_code != 200:
+        raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
+    data = r.json()
+    rows: list[StandingRow] = []
+    for div in data.get("divisions", []):
+        for raw in div.get("teams", []):
+            if raw.get("id") is None:
+                continue
+            rec = raw.get("recordOverall") or raw.get("record") or {}
+            rows.append(StandingRow(
+                rank=int(rec.get("rank") or 0),
+                team=_team(raw),
+                wins=int(rec.get("wins") or 0),
+                losses=int(rec.get("losses") or 0),
+                ties=int(rec.get("ties") or 0),
+                points_for=_num(raw.get("pointsFor")),
+                points_against=_num(raw.get("pointsAgainst")),
+                division=div.get("name") or "",
+            ))
+    if not rows:
+        raise FleaflickerError("La liga no tiene clasificación")
+    rows.sort(key=lambda r: (r.rank or 999, -(r.wins + r.ties / 2), -(r.points_for or 0)))
+    return rows
+
+
+@dataclass
+class Game:
+    away: Team
+    home: Team
+    away_score: float | None
+    home_score: float | None
+    final: bool
+
+
+@dataclass
+class Scoreboard:
+    week: int | None
+    games: list[Game]
+
+
+async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str | None,
+                           week: int | None = None) -> Scoreboard:
+    params: dict = {"league_id": league_id}
+    if sport:
+        params["sport"] = sport
+    if week:
+        params["scoring_period"] = week
+    r = await client.get(f"{API}/FetchLeagueScoreboard", params=params, timeout=20)
+    if r.status_code != 200:
+        raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
+    data = r.json()
+    period = data.get("schedulePeriod") or {}
+    ordinal = period.get("ordinal") or period.get("value") or week
+    games: list[Game] = []
+    for g in data.get("games", []):
+        away, home = g.get("away") or {}, g.get("home") or {}
+        if away.get("id") is None or home.get("id") is None:
+            continue
+        games.append(Game(
+            away=_team(away), home=_team(home),
+            away_score=_num((g.get("awayScore") or {}).get("score", g.get("awayScore"))),
+            home_score=_num((g.get("homeScore") or {}).get("score", g.get("homeScore"))),
+            final=bool(g.get("isFinalScore")),
+        ))
+    if not games:
+        raise FleaflickerError("No hay enfrentamientos esa jornada (¿la liga no es H2H?)")
+    return Scoreboard(week=int(ordinal) if ordinal else None, games=games)
