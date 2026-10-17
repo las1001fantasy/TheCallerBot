@@ -459,6 +459,7 @@ async def cmd_getscoreboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
 REPORT_DAY = 1    # martes (lunes = 0)
 REPORT_HOUR = 12
+REPORT_PARALLEL = 4  # informes que se preparan a la vez
 
 
 def report_when(league) -> str:
@@ -481,30 +482,44 @@ cmd_disablescoreboard = _toggle("scoreboard_weekly", 0, "scoreboard_off")
 
 
 async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Martes a las 12h (hora de España): resultados de la jornada pasada y clasificación."""
+    """Martes a las 12h (hora de España): resultados de la jornada pasada y clasificación.
+
+    Se lanza cada 15 minutos: las ligas se procesan unas pocas a la vez y con una pausa entre envíos, y la que
+    falle (Fleaflicker lento, por ejemplo) se reintenta en la siguiente vuelta hasta que acabe el martes.
+    """
     now = datetime.now(TIMEZONE)
+    if now.weekday() != REPORT_DAY or now.hour < REPORT_HOUR:
+        return
     year, isoweek, _ = now.isocalendar()
     tag = f"{year}-W{isoweek:02d}"
     db = storage(ctx)
-    for league in db.report_leagues():
-        if now.weekday() != REPORT_DAY or now.hour < REPORT_HOUR or league["last_report"] == tag:
-            continue
-        chat_id, thread_key = league["chat_id"], league["thread_key"]
-        lang = lang_of(league)
-        parts = [t(lang, "weekly_title")]
-        try:
-            if league["scoreboard_weekly"]:
-                current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
-                last_week = (current.week - 1) if current.week and current.week > 1 else None
-                parts.append(await scoreboard_text(ctx, league, last_week))
-            if league["standings_weekly"]:
-                parts.append(await standings_text(ctx, league))
-        except Exception:
-            log.exception("Error en el informe semanal de la liga %s", league["league_id"])
-            continue
-        await ctx.bot.send_message(chat_id, "\n\n".join(parts), message_thread_id=thread_key or None,
-                                   link_preview_options=NO_PREVIEW)
-        db.update_league(chat_id, thread_key, last_report=tag)
+    pending = [lg for lg in db.report_leagues() if lg["last_report"] != tag]
+    if not pending:
+        return
+    log.info("Informes semanales: %s ligas pendientes", len(pending))
+    sem = asyncio.Semaphore(REPORT_PARALLEL)
+
+    async def one(league) -> None:
+        async with sem:
+            chat_id, thread_key = league["chat_id"], league["thread_key"]
+            lang = lang_of(league)
+            parts = [t(lang, "weekly_title")]
+            try:
+                if league["scoreboard_weekly"]:
+                    current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
+                    last_week = (current.week - 1) if current.week and current.week > 1 else None
+                    parts.append(await scoreboard_text(ctx, league, last_week))
+                if league["standings_weekly"]:
+                    parts.append(await standings_text(ctx, league))
+                await ctx.bot.send_message(chat_id, "\n\n".join(parts), message_thread_id=thread_key or None,
+                                           link_preview_options=NO_PREVIEW)
+            except Exception:
+                log.exception("Error en el informe semanal de la liga %s", league["league_id"])
+                return
+            db.update_league(chat_id, thread_key, last_report=tag)
+            await asyncio.sleep(1)  # margen para los límites de Telegram y Fleaflicker
+
+    await asyncio.gather(*(one(league) for league in pending))
 
 
 # ---------- Chequeo periódico ----------
