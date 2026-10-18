@@ -261,9 +261,20 @@ def _is_rookie(pro: dict) -> bool | None:
     return None  # no sabemos
 
 
-def roster_issues(data: dict, lang: str = "es") -> list[str]:
-    """Problemas de una plantilla: lesionados de titular, sanos en IR, no rookies en TAXI, huecos vacíos."""
+def _on_bye(lp: dict, pro: dict, week: int | None) -> bool:
+    """Titular cuyo equipo descansa esta semana (NFL): por la semana de bye o porque el partido pedido es un bye."""
+    for g in lp.get("requestedGames") or []:
+        if g.get("isBye") or (g.get("game") or {}).get("isBye"):
+            return True
+    bye = pro.get("nflByeWeek") or pro.get("byeWeek")
+    return bool(week and bye and int(bye) == int(week))
+
+
+def roster_issues(data: dict, lang: str = "es", week: int | None = None) -> list[str]:
+    """Problemas de una plantilla: lesionados o de bye de titular, sanos en IR, no rookies en TAXI, huecos vacíos."""
     issues: list[str] = []
+    period = data.get("schedulePeriod") or data.get("scoringPeriod") or {}
+    week = week or (period.get("ordinal") if isinstance(period, dict) else None)
     for group in data.get("groups", []):
         gname = str(group.get("group") or group.get("label") or "").upper()
         for slot in group.get("slots", []):
@@ -283,6 +294,8 @@ def roster_issues(data: dict, lang: str = "es") -> list[str]:
             status = _status(pro)
             if starter and _is_bad(pro):
                 issues.append(t(lang, "issue_injured_starter", name=name, status=status, where=where))
+            elif starter and _on_bye(lp, pro, week):
+                issues.append(t(lang, "issue_bye", name=name, where=where))
             elif in_ir and not _is_bad(pro) and status in OK_STATUS:
                 issues.append(t(lang, "issue_healthy_ir", name=name, status=f" ({status})" if status else ""))
             elif in_taxi and _is_rookie(pro) is False:

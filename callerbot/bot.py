@@ -245,13 +245,19 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         return
     lang = lang_of(league)
     await reply(update, t(lang, "checking_rosters"))
+    week = None
+    if (league["sport"] or "").upper() == "NFL":  # los byes solo existen en la NFL
+        try:
+            week = (await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])).week
+        except (FleaflickerError, httpx.HTTPError, ValueError):
+            log.warning("No pude saber la semana actual de la liga %s para los byes", league["league_id"])
 
     async def one(team: Team):
         try:
             data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
             if not data.get("groups"):
                 log.warning("FetchRoster sin 'groups' para el equipo %s: claves %s", team.id, list(data))
-            return team, roster_issues(data, lang), None
+            return team, roster_issues(data, lang, week), None
         except (FleaflickerError, httpx.HTTPError, ValueError) as e:
             return team, [], str(e)
 
