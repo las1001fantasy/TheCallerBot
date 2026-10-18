@@ -229,13 +229,26 @@ async def fetch_roster(client: httpx.AsyncClient, league_id: int, sport: str | N
     return r.json()
 
 
-def _status(pro: dict) -> str:
+def _statuses(pro: dict) -> list[str]:
+    """Todos los valores de lesión que da Fleaflicker (abreviatura, gravedad, nombre completo), en mayúsculas."""
     injury = pro.get("injury") or {}
+    values = []
     # Fleaflicker escribe "typeAbbreviaition" (con la errata); probamos también la forma correcta.
     for key in ("typeAbbreviaition", "typeAbbreviation", "severity", "typeFull"):
         if injury.get(key):
-            return str(injury[key]).upper()
-    return ""
+            values.append(str(injury[key]).upper().replace(" ", "_"))
+    return values
+
+
+def _status(pro: dict) -> str:
+    values = _statuses(pro)
+    bad = [v for v in values if v in BAD_STATUS or v.startswith("OUT")]
+    return (bad or values or [""])[0].replace("_", " ")
+
+
+def _is_bad(pro: dict) -> bool:
+    """Lesionado de verdad: basta con que uno de los campos diga OUT, IR, etc. (antes solo mirábamos el primero)."""
+    return any(v in BAD_STATUS or v.startswith("OUT") for v in _statuses(pro))
 
 
 def _is_rookie(pro: dict) -> bool | None:
@@ -259,7 +272,7 @@ def roster_issues(data: dict, lang: str = "es") -> list[str]:
             where = label or gname
             lp = slot.get("leaguePlayer") or {}
             pro = lp.get("proPlayer") or {}
-            starter = gname == "START"
+            starter = gname in ("START", "STARTER", "STARTERS")
             in_ir = gname in ("INJURED", "INJURED_RESERVE") or label in ("IR", "INJ")
             in_taxi = gname == "TAXI" or label == "TAXI"
             if not pro:
@@ -268,9 +281,9 @@ def roster_issues(data: dict, lang: str = "es") -> list[str]:
                 continue
             name = pro.get("nameFull") or pro.get("nameShort") or "?"
             status = _status(pro)
-            if starter and status in BAD_STATUS:
+            if starter and _is_bad(pro):
                 issues.append(t(lang, "issue_injured_starter", name=name, status=status, where=where))
-            elif in_ir and status in OK_STATUS:
+            elif in_ir and not _is_bad(pro) and status in OK_STATUS:
                 issues.append(t(lang, "issue_healthy_ir", name=name, status=f" ({status})" if status else ""))
             elif in_taxi and _is_rookie(pro) is False:
                 issues.append(t(lang, "issue_taxi", name=name))
