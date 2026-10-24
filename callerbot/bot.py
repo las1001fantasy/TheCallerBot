@@ -6,6 +6,7 @@ Cada canal (un grupo, o un tema dentro de un grupo con temas) tiene como mucho u
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -278,6 +279,31 @@ async def cmd_whosotc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await reply(update, t(lang_of(league), "ff_error", error=e))
         return
     await reply(update, otc_line(state, storage(ctx).users(*channel(update)), lang_of(league)))
+
+
+async def cmd_debugroster(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Diagnóstico: qué datos da Fleaflicker de los titulares de un equipo (/debugRoster <nº de /getTeams>)."""
+    league = await require_league(update, ctx, manager=True)
+    if not league:
+        return
+    try:
+        state = await load_state(ctx, league)
+        n = int(ctx.args[0]) if ctx.args else 1
+        team = state.teams[n - 1]
+        data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
+    except (FleaflickerError, httpx.HTTPError, ValueError, IndexError) as e:
+        await reply(update, f"Error: {e}")
+        return
+    lines = [f"{team.name} · claves: {', '.join(k for k in data if k != 'groups')}"]
+    for group in data.get("groups", []):
+        lines.append(f"[{group.get('group')}]")
+        for slot in group.get("slots", [])[:3]:
+            lp = slot.get("leaguePlayer") or {}
+            pro = lp.get("proPlayer") or {}
+            extra = {k: v for k, v in lp.items() if k != "proPlayer"}
+            lines.append(f"- {pro.get('nameFull')} · lp: {json.dumps(extra, ensure_ascii=False)[:600]}")
+            lines.append(f"  pro: {', '.join(pro)}")
+    await reply(update, "\n".join(lines))
 
 
 DAILY_SPORTS = {"NBA", "NHL", "MLB"}  # juegan casi a diario: avisamos de titulares sin partido hoy
@@ -647,7 +673,7 @@ COMMANDS = {
     "whosotc": cmd_whosotc, "getleague": cmd_getleague, "getleagueinfo": cmd_getleagueinfo,
     "getmissingusers": cmd_getmissingusers, "unsetleague": cmd_unsetleague, "setcommish": cmd_setcommish,
     "addtelegramusers": cmd_addtelegramusers, "startdraft": cmd_startdraft, "stopdraft": cmd_stopdraft,
-    "getillegalrosters": cmd_getillegalrosters,
+    "getillegalrosters": cmd_getillegalrosters, "debugroster": cmd_debugroster,
     "getleaguestanding": cmd_getleaguestanding, "getscoreboard": cmd_getscoreboard,
     "enablestandingnotification": cmd_enablestanding, "disablestandingnotification": cmd_disablestanding,
     "enablescoreboardnotification": cmd_enablescoreboard, "disablescoreboardnotification": cmd_disablescoreboard,
