@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
+from telegram.error import RetryAfter
 from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -115,8 +116,19 @@ def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
 
 
 async def reply(update: Update, text: str) -> None:
-    for chunk in split_message(text):
-        await update.effective_message.reply_text(chunk, do_quote=False, link_preview_options=NO_PREVIEW)
+    chunks = split_message(text)
+    for i, chunk in enumerate(chunks):
+        if i:
+            await asyncio.sleep(1)  # varios trozos seguidos: sin pausa Telegram aplica el control de flood
+        for attempt in range(3):
+            try:
+                await update.effective_message.reply_text(chunk, do_quote=False, link_preview_options=NO_PREVIEW)
+                break
+            except RetryAfter as e:  # Telegram pide esperar unos segundos: esperamos y reintentamos
+                if attempt == 2:
+                    raise
+                wait = e.retry_after.total_seconds() if hasattr(e.retry_after, "total_seconds") else e.retry_after
+                await asyncio.sleep(float(wait) + 1)
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
