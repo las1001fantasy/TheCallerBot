@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
 import httpx
@@ -270,11 +272,31 @@ def _on_bye(lp: dict, pro: dict, week: int | None) -> bool:
     return bool(week and bye and int(bye) == int(week))
 
 
-def roster_issues(data: dict, lang: str = "es", week: int | None = None) -> list[str]:
+# Los partidos de NBA, NHL y MLB son en EE. UU.: "hoy" es el día de allí (los de madrugada en España cuentan como de hoy).
+US_TZ = ZoneInfo("America/New_York")
+
+
+def _plays_today(lp: dict) -> bool | None:
+    """¿El jugador tiene partido hoy? None si Fleaflicker no da la lista de partidos (así no avisamos a ciegas)."""
+    if "requestedGames" not in lp:
+        return None
+    today = datetime.now(US_TZ).date()
+    for g in lp.get("requestedGames") or []:
+        game = g.get("game") or g
+        if g.get("isBye") or game.get("isBye"):
+            continue
+        start = game.get("startEpochMilli") or g.get("startEpochMilli")
+        if not start or datetime.fromtimestamp(int(start) / 1000, US_TZ).date() == today:
+            return True
+    return False
+
+
+def roster_issues(data: dict, lang: str = "es", week: int | None = None, daily: bool = False) -> list[str]:
     """Problemas de una plantilla: lesionados o de bye de titular, sanos en IR, no rookies en TAXI, huecos vacíos."""
     issues: list[str] = []
     period = data.get("schedulePeriod") or data.get("scoringPeriod") or {}
     week = week or (period.get("ordinal") if isinstance(period, dict) else None)
+    no_game = 0  # en deportes diarios solo contamos los titulares sin partido hoy, para no hacer una lista enorme
     for group in data.get("groups", []):
         gname = str(group.get("group") or group.get("label") or "").upper()
         for slot in group.get("slots", []):
@@ -294,12 +316,16 @@ def roster_issues(data: dict, lang: str = "es", week: int | None = None) -> list
             status = _status(pro)
             if starter and _is_bad(pro):
                 issues.append(t(lang, "issue_injured_starter", name=name, status=status, where=where))
-            elif starter and _on_bye(lp, pro, week):
+            elif starter and daily and _plays_today(lp) is False:
+                no_game += 1
+            elif starter and not daily and _on_bye(lp, pro, week):
                 issues.append(t(lang, "issue_bye", name=name, where=where))
             elif in_ir and not _is_bad(pro) and status in OK_STATUS:
                 issues.append(t(lang, "issue_healthy_ir", name=name, status=f" ({status})" if status else ""))
             elif in_taxi and _is_rookie(pro) is False:
                 issues.append(t(lang, "issue_taxi", name=name))
+    if no_game:
+        issues.append(t(lang, "issue_no_game", n=no_game))
     return issues
 
 

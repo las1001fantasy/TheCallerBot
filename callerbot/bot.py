@@ -280,6 +280,9 @@ async def cmd_whosotc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await reply(update, otc_line(state, storage(ctx).users(*channel(update)), lang_of(league)))
 
 
+DAILY_SPORTS = {"NBA", "NHL", "MLB"}  # juegan casi a diario: avisamos de titulares sin partido hoy
+
+
 async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     league = await require_league(update, ctx, manager=False)
     if not league:
@@ -292,7 +295,8 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     lang = lang_of(league)
     await reply(update, t(lang, "checking_rosters"))
     week = None
-    if (league["sport"] or "").upper() == "NFL":  # los byes solo existen en la NFL
+    sport = (league["sport"] or "").upper()
+    if sport == "NFL":  # los byes solo existen en la NFL
         try:
             week = (await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])).week
         except (FleaflickerError, httpx.HTTPError, ValueError):
@@ -303,7 +307,10 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
             if not data.get("groups"):
                 log.warning("FetchRoster sin 'groups' para el equipo %s: claves %s", team.id, list(data))
-            return team, roster_issues(data, lang, week), None
+            if sport in DAILY_SPORTS and "requestedGames" not in str(data):
+                log.warning("FetchRoster sin 'requestedGames' (equipo %s, liga %s): no sé quién juega hoy",
+                            team.id, league["league_id"])
+            return team, roster_issues(data, lang, week, daily=sport in DAILY_SPORTS), None
         except (FleaflickerError, httpx.HTTPError, ValueError) as e:
             return team, [], str(e)
         except Exception as e:  # un formato raro de un equipo no debe dejar sin respuesta al resto

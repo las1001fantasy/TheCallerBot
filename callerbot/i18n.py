@@ -14,7 +14,7 @@ Comandos públicos:
 /getChannelID - Devuelve el ID del canal
 /getTeams - Lista los equipos con su usuario de Fleaflicker y de Telegram
 /whosOTC - Quién está on the clock (también vale escribir "who's on the clock")
-/getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) o de BYE de titular, sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
+/getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) o de BYE de titular, titulares sin partido hoy (NBA, NHL, MLB), sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
 /getLeagueStanding - Clasificación de la liga
 /getScoreBoard (jornada) - Resultados de la jornada actual, o de la que indiques (ligas H2H)
 
@@ -43,7 +43,7 @@ Ordres públiques:
 /getChannelID - Retorna l'ID del canal
 /getTeams - Llista els equips amb el seu usuari de Fleaflicker i de Telegram
 /whosOTC - Qui està on the clock (també val escriure "who's on the clock")
-/getIllegalRosters - Revisa les plantilles: lesionats (OUT, IR, PUP, EX...) o de BYE de titular, sans a l'IR, no rookies al TAXI i forats buits (les Q no s'avisen)
+/getIllegalRosters - Revisa les plantilles: lesionats (OUT, IR, PUP, EX...) o de BYE de titular, titulars sense partit avui (NBA, NHL, MLB), sans a l'IR, no rookies al TAXI i forats buits (les Q no s'avisen)
 /getLeagueStanding - Classificació de la lliga
 /getScoreBoard (jornada) - Resultats de la jornada actual, o de la que indiquis (lligues H2H)
 
@@ -118,6 +118,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_healthy_ir": "{name} está sano{status} y ocupa un hueco de IR",
         "issue_taxi": "{name} no es rookie y está en TAXI",
         "issue_bye": "{name} (BYE) de titular en {where}",
+        "issue_no_game": "tiene {n} titular(es) que no juegan hoy",
         "standings_header": "Clasificación de la liga {league_id}:",
         "scoreboard_header": "Resultados de la jornada {week}:",
         "scoreboard_header_noweek": "Resultados de la jornada:",
@@ -183,6 +184,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_healthy_ir": "{name} està sa{status} i ocupa un forat d'IR",
         "issue_taxi": "{name} no és rookie i està al TAXI",
         "issue_bye": "{name} (BYE) de titular a {where}",
+        "issue_no_game": "té {n} titular(s) que no juguen avui",
         "standings_header": "Classificació de la lliga {league_id}:",
         "scoreboard_header": "Resultats de la jornada {week}:",
         "scoreboard_header_noweek": "Resultats de la jornada:",
