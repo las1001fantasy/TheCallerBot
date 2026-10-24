@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
 import httpx
@@ -272,23 +270,15 @@ def _on_bye(lp: dict, pro: dict, week: int | None) -> bool:
     return bool(week and bye and int(bye) == int(week))
 
 
-# Los partidos de NBA, NHL y MLB son en EE. UU.: "hoy" es el día de allí (los de madrugada en España cuentan como de hoy).
-US_TZ = ZoneInfo("America/New_York")
-
-
 def _plays_today(lp: dict) -> bool | None:
-    """¿El jugador tiene partido hoy? None si Fleaflicker no da la lista de partidos (así no avisamos a ciegas)."""
-    if "requestedGames" not in lp:
-        return None
-    today = datetime.now(US_TZ).date()
-    for g in lp.get("requestedGames") or []:
-        game = g.get("game") or g
-        if g.get("isBye") or game.get("isBye"):
-            continue
-        start = game.get("startEpochMilli") or g.get("startEpochMilli")
-        if not start or datetime.fromtimestamp(int(start) / 1000, US_TZ).date() == today:
-            return True
-    return False
+    """¿El jugador tiene partido hoy? Fleaflicker pone en requestedGames los partidos del día (requestedGamesPeriod)
+    y, si no juega, omite requestedGames pero deja requestedGamesPeriod. None si no hay ninguno de los dos."""
+    games = [g for g in lp.get("requestedGames") or [] if not (g.get("isBye") or (g.get("game") or {}).get("isBye"))]
+    if games:
+        return True
+    if "requestedGames" in lp or "requestedGamesPeriod" in lp:
+        return False
+    return None
 
 
 def roster_issues(data: dict, lang: str = "es", week: int | None = None, daily: bool = False) -> list[str]:

@@ -333,7 +333,7 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             data = await fetch_roster(http(ctx), league["league_id"], league["sport"], team.id)
             if not data.get("groups"):
                 log.warning("FetchRoster sin 'groups' para el equipo %s: claves %s", team.id, list(data))
-            if sport in DAILY_SPORTS and "requestedGames" not in str(data):
+            if sport in DAILY_SPORTS and "requestedGamesPeriod" not in str(data) and "requestedGames" not in str(data):
                 log.warning("FetchRoster sin 'requestedGames' (equipo %s, liga %s): no sé quién juega hoy",
                             team.id, league["league_id"])
             return team, roster_issues(data, lang, week, daily=sport in DAILY_SPORTS), None
