@@ -91,8 +91,42 @@ def mention(nick: str) -> str:
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
+MAX_MESSAGE = 4000  # Telegram corta en 4096 caracteres y rechaza el mensaje entero si se pasa
+
+
+def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
+    """Trocea por líneas para que un listado largo (p. ej. /getIllegalRosters) no se pierda por pasarse del límite."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    return chunks or [text]
+
+
 async def reply(update: Update, text: str) -> None:
-    await update.effective_message.reply_text(text, do_quote=False, link_preview_options=NO_PREVIEW)
+    for chunk in split_message(text):
+        await update.effective_message.reply_text(chunk, do_quote=False, link_preview_options=NO_PREVIEW)
+
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Que un fallo inesperado quede en los registros y el usuario no se quede esperando sin respuesta."""
+    log.error("Error atendiendo un mensaje", exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(f"⚠️ Error: {ctx.error}", do_quote=False)
+        except Exception:
+            pass
 
 
 async def is_manager(update: Update, league) -> bool:
@@ -260,6 +294,9 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             return team, roster_issues(data, lang, week), None
         except (FleaflickerError, httpx.HTTPError, ValueError) as e:
             return team, [], str(e)
+        except Exception as e:  # un formato raro de un equipo no debe dejar sin respuesta al resto
+            log.exception("Error revisando la plantilla del equipo %s de la liga %s", team.id, league["league_id"])
+            return team, [], f"{type(e).__name__}: {e}"
 
     results = await asyncio.gather(*(one(t) for t in state.teams))
     users = storage(ctx).users(*channel(update))
@@ -630,6 +667,7 @@ def main() -> None:
     for name, handler in COMMANDS.items():
         app.add_handler(CommandHandler(name, handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(OTC_TEXT), cmd_whosotc))
+    app.add_error_handler(on_error)
 
     app.job_queue.run_repeating(check_all, interval=interval, first=10)
     app.job_queue.run_repeating(weekly_reports, interval=900, first=60)
