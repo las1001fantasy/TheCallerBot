@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -219,11 +220,24 @@ BAD_STATUS = {"O", "OUT", "IR", "PUP", "NFI", "EX", "SUSP", "SUS", "D", "DOUBTFU
 OK_STATUS = {"", "Q", "QUESTIONABLE", "P", "PROBABLE", "GTD", "DTD", "ACTIVE", "HEALTHY"}
 
 
+# Plantillas: pocas a la vez y con una pausa, compartido entre todos los grupos, para que Fleaflicker no nos frene
+# cuando se lanzan varios /getIllegalRosters seguidos.
+ROSTER_PARALLEL, ROSTER_PAUSE, ROSTER_RETRIES, ROSTER_BACKOFF = 3, 0.3, 2, 3.0
+_roster_sem = asyncio.Semaphore(ROSTER_PARALLEL)
+
+
 async def fetch_roster(client: httpx.AsyncClient, league_id: int, sport: str | None, team_id: int) -> dict:
     params = {"league_id": league_id, "team_id": team_id}
     if sport:
         params["sport"] = sport
-    r = await client.get(f"{API}/FetchRoster", params=params, timeout=20)
+    async with _roster_sem:
+        for attempt in range(ROSTER_RETRIES + 1):
+            r = await client.get(f"{API}/FetchRoster", params=params, timeout=20)
+            # 403/429: Fleaflicker frena por exceso de peticiones; esperamos un poco y reintentamos
+            if r.status_code not in (403, 429) or attempt == ROSTER_RETRIES:
+                break
+            await asyncio.sleep(ROSTER_BACKOFF * (attempt + 1))
+        await asyncio.sleep(ROSTER_PAUSE)
     if r.status_code != 200:
         raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
     return r.json()
