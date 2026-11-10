@@ -22,7 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from .fleaflicker import (
     SPORTS, DraftState, FleaflickerError, Team, _fmt, detect_sport, fetch_roster, fetch_scoreboard, fetch_standings,
-    fetch_state, roster_issues,
+    fetch_owners, fetch_state, roster_issues,
 )
 from .i18n import LANG_WORDS, t
 from .storage import Storage
@@ -495,9 +495,27 @@ async def cmd_setnotificationduration(update: Update, ctx: ContextTypes.DEFAULT_
 
 # ---------- Clasificación y resultados ----------
 
+async def team_labeler(ctx: ContextTypes.DEFAULT_TYPE, league):
+    """Devuelve una función que pone el @nick de Telegram del manager al lado del nombre del equipo."""
+    users = storage(ctx).users(league["chat_id"], league["thread_key"])
+    try:
+        owners = await fetch_owners(http(ctx), league["league_id"], league["sport"])  # con caché de 6 h
+    except (FleaflickerError, httpx.HTTPError, ValueError):
+        owners = {}
+
+    def label(team: Team) -> str:
+        if not team.owners:
+            team.owners = owners.get(team.id, [])
+        nicks = telegram_of(team, users)
+        return f"{team.name} ({' '.join(nicks)})" if nicks else team.name
+
+    return label
+
+
 async def standings_text(ctx: ContextTypes.DEFAULT_TYPE, league) -> str:
     lang = lang_of(league)
     rows = await fetch_standings(http(ctx), league["league_id"], league["sport"])
+    label = await team_labeler(ctx, league)
     lines = [t(lang, "standings_header", league_id=league["league_id"])]
     division = None
     multi = len({r.division for r in rows}) > 1
@@ -506,7 +524,7 @@ async def standings_text(ctx: ContextTypes.DEFAULT_TYPE, league) -> str:
             division = r.division
             lines.append(f"\n{division}")
         record = f"{r.wins}-{r.losses}" + (f"-{r.ties}" if r.ties else "")
-        lines.append(f"{r.rank or i}. {r.team.name} · {record} · PF {_fmt(r.points_for)} · PA {_fmt(r.points_against)}")
+        lines.append(f"{r.rank or i}. {label(r.team)} · {record} · PF {_fmt(r.points_for)} · PA {_fmt(r.points_against)}")
     return "\n".join(lines)
 
 
@@ -514,11 +532,12 @@ async def scoreboard_text(ctx: ContextTypes.DEFAULT_TYPE, league, week: int | No
     lang = lang_of(league)
     board = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"], week)
     header = t(lang, "scoreboard_header", week=board.week) if board.week else t(lang, "scoreboard_header_noweek")
-    lines = [header]
-    for g in board.games:
+    label = await team_labeler(ctx, league)
+    blocks = [header]
+    for g in board.games:  # cada equipo en su línea: con el @nick una sola línea queda demasiado larga
         status = "" if g.final else f" ({t(lang, 'in_progress')})"
-        lines.append(f"{g.away.name} {_fmt(g.away_score)} - {_fmt(g.home_score)} {g.home.name}{status}")
-    return "\n".join(lines)
+        blocks.append(f"{label(g.away)} {_fmt(g.away_score)}\n{label(g.home)} {_fmt(g.home_score)}{status}")
+    return "\n\n".join(blocks)
 
 
 async def cmd_getleaguestanding(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
