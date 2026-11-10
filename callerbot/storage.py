@@ -63,6 +63,12 @@ class Storage:
 
     def set_league(self, chat_id: int, thread_key: int, league_id: int, sport: str, commish: str | None,
                    lang: str = "es") -> None:
+        old = self.get_league(chat_id, thread_key)
+        if old and old["league_id"] == league_id and old["sport"] == sport:
+            # Repetir /setLeague con la misma liga (p. ej. para cambiar idioma o commish) no borra los informes,
+            # los recordatorios ni el estado del draft.
+            self.update_league(chat_id, thread_key, commish=commish, lang=lang)
+            return
         self.db.execute(
             "DELETE FROM leagues WHERE chat_id = ? AND thread_key = ?", (chat_id, thread_key)
         )
