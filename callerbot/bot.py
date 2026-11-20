@@ -629,6 +629,57 @@ async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await asyncio.gather(*(one(league) for league in pending))
 
 
+async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
+    """La jornada actual si ya ha terminado; si aún se juega, la anterior (la última con resultados cerrados)."""
+    current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
+    if current.games and all(g.final for g in current.games):
+        return current.week
+    return (current.week - 1) if current.week and current.week > 1 else current.week
+
+
+NOTIFY_PAUSE = 3  # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram
+
+
+async def cmd_notifyallleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/notifyAllLeagues [NFL|NBA|NHL|MLB]: en cada liga donde quien lo escribe es el commish, publica los
+    resultados y después la clasificación. Sin deporte, solo las de NFL. Pensado para el chat privado con el bot."""
+    user = update.effective_user
+    if not user or not user.username:
+        await reply(update, t("es", "notify_no_username"))
+        return
+    sport = ctx.args[0].upper() if ctx.args else "NFL"
+    if sport not in SPORTS:
+        await reply(update, t("es", "notify_usage"))
+        return
+    me = norm(f"@{user.username}")
+    leagues = [lg for lg in storage(ctx).all_leagues()
+               if lg["commish"] and norm(lg["commish"]) == me and (lg["sport"] or "").upper() == sport]
+    if not leagues:
+        await reply(update, t("es", "notify_none", sport=sport))
+        return
+    await reply(update, t("es", "notify_start", n=len(leagues), sport=sport))
+    sent, failed = 0, []
+    for i, league in enumerate(leagues):
+        if i:
+            await asyncio.sleep(NOTIFY_PAUSE)
+        chat_id, thread_key = league["chat_id"], league["thread_key"]
+        try:
+            week = await finished_week(ctx, league)
+            for text in (await scoreboard_text(ctx, league, week), await standings_text(ctx, league)):
+                for chunk in split_message(text):
+                    await ctx.bot.send_message(chat_id, chunk, message_thread_id=thread_key or None,
+                                               link_preview_options=NO_PREVIEW)
+                    await asyncio.sleep(1)
+            sent += 1
+        except Exception as e:
+            log.exception("notifyAllLeagues: error en la liga %s", league["league_id"])
+            failed.append(f"{league['league_id']}: {e}")
+    text = t("es", "notify_done", n=sent)
+    if failed:
+        text += "\n" + t("es", "notify_failed") + "\n" + "\n".join(failed)
+    await reply(update, text)
+
+
 # ---------- Chequeo periódico ----------
 
 async def check_league(ctx: ContextTypes.DEFAULT_TYPE, league) -> None:
@@ -691,6 +742,7 @@ COMMANDS = {
     "setleague": cmd_setleague, "getchannelid": cmd_getchannelid, "getteams": cmd_getteams,
     "whosotc": cmd_whosotc, "getleague": cmd_getleague, "getleagueinfo": cmd_getleagueinfo,
     "getmissingusers": cmd_getmissingusers, "unsetleague": cmd_unsetleague, "setcommish": cmd_setcommish,
+    "notifyallleagues": cmd_notifyallleagues, "notifymyleagues": cmd_notifyallleagues,
     "addtelegramusers": cmd_addtelegramusers, "startdraft": cmd_startdraft, "stopdraft": cmd_stopdraft,
     "getillegalrosters": cmd_getillegalrosters, "debugroster": cmd_debugroster,
     "getleaguestanding": cmd_getleaguestanding, "getscoreboard": cmd_getscoreboard,

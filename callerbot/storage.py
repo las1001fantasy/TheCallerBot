@@ -97,6 +97,9 @@ class Storage:
             "SELECT * FROM leagues WHERE standings_weekly = 1 OR scoreboard_weekly = 1"
         ).fetchall()
 
+    def all_leagues(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM leagues ORDER BY chat_id, thread_key").fetchall()
+
     def drafting_leagues(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM leagues WHERE drafting = 1").fetchall()
 
