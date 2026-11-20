@@ -41,11 +41,37 @@ class DraftState:
     picks_made: int
 
 
+# Todas las peticiones a Fleaflicker pasan por aquí: pocas a la vez, con un mínimo de tiempo entre una y otra
+# (compartido por todos los grupos), y si Fleaflicker nos frena (403/429) esperamos cada vez más y reintentamos.
+API_PARALLEL = 3
+API_SPACING = 0.4              # segundos mínimos entre el inicio de dos peticiones
+API_BACKOFF = (5, 15, 40)      # esperas antes de cada reintento tras un 403/429
+_api_sem = asyncio.Semaphore(API_PARALLEL)
+_api_lock = asyncio.Lock()
+_api_last = 0.0
+
+
+async def _get(client: httpx.AsyncClient, endpoint: str, params: dict) -> httpx.Response:
+    global _api_last
+    for attempt in range(len(API_BACKOFF) + 1):
+        async with _api_sem:
+            async with _api_lock:
+                wait = _api_last + API_SPACING - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                _api_last = time.monotonic()
+            r = await client.get(f"{API}/{endpoint}", params=params, timeout=20)
+        if r.status_code not in (403, 429) or attempt == len(API_BACKOFF):
+            return r
+        await asyncio.sleep(API_BACKOFF[attempt])
+    return r
+
+
 async def fetch_board(client: httpx.AsyncClient, league_id: int, sport: str | None) -> dict:
     params = {"league_id": league_id}
     if sport:
         params["sport"] = sport
-    r = await client.get(f"{API}/FetchLeagueDraftBoard", params=params, timeout=20)
+    r = await _get(client, "FetchLeagueDraftBoard", params)
     if r.status_code != 200:
         raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
     data = r.json()
@@ -146,7 +172,7 @@ async def _standings_teams(client: httpx.AsyncClient, league_id: int, sport: str
     params = {"league_id": league_id}
     if sport:
         params["sport"] = sport
-    r = await client.get(f"{API}/FetchLeagueStandings", params=params, timeout=20)
+    r = await _get(client, "FetchLeagueStandings", params)
     data = r.json() if r.status_code == 200 else {}
     teams = [_team(t) for d in data.get("divisions", []) for t in d.get("teams", []) if t.get("id") is not None]
     return sorted(teams, key=lambda t: t.name)
@@ -176,7 +202,7 @@ async def _fetch_owners(client: httpx.AsyncClient, league_id: int, sport: str | 
     owners: dict[int, list[str]] = {}
     for endpoint in ("FetchLeagueStandings", "FetchLeagueRosters"):
         try:
-            r = await client.get(f"{API}/{endpoint}", params=params, timeout=20)
+            r = await _get(client, endpoint, params)
             if r.status_code != 200:
                 continue
             data = r.json()
@@ -220,24 +246,11 @@ BAD_STATUS = {"O", "OUT", "IR", "PUP", "NFI", "EX", "SUSP", "SUS", "D", "DOUBTFU
 OK_STATUS = {"", "Q", "QUESTIONABLE", "P", "PROBABLE", "GTD", "DTD", "ACTIVE", "HEALTHY"}
 
 
-# Plantillas: pocas a la vez y con una pausa, compartido entre todos los grupos, para que Fleaflicker no nos frene
-# cuando se lanzan varios /getIllegalRosters seguidos.
-ROSTER_PARALLEL, ROSTER_PAUSE, ROSTER_RETRIES, ROSTER_BACKOFF = 3, 0.3, 2, 3.0
-_roster_sem = asyncio.Semaphore(ROSTER_PARALLEL)
-
-
 async def fetch_roster(client: httpx.AsyncClient, league_id: int, sport: str | None, team_id: int) -> dict:
     params = {"league_id": league_id, "team_id": team_id}
     if sport:
         params["sport"] = sport
-    async with _roster_sem:
-        for attempt in range(ROSTER_RETRIES + 1):
-            r = await client.get(f"{API}/FetchRoster", params=params, timeout=20)
-            # 403/429: Fleaflicker frena por exceso de peticiones; esperamos un poco y reintentamos
-            if r.status_code not in (403, 429) or attempt == ROSTER_RETRIES:
-                break
-            await asyncio.sleep(ROSTER_BACKOFF * (attempt + 1))
-        await asyncio.sleep(ROSTER_PAUSE)
+    r = await _get(client, "FetchRoster", params)
     if r.status_code != 200:
         raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
     return r.json()
@@ -367,7 +380,7 @@ async def fetch_standings(client: httpx.AsyncClient, league_id: int, sport: str 
     params = {"league_id": league_id}
     if sport:
         params["sport"] = sport
-    r = await client.get(f"{API}/FetchLeagueStandings", params=params, timeout=20)
+    r = await _get(client, "FetchLeagueStandings", params)
     if r.status_code != 200:
         raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
     data = r.json()
@@ -415,7 +428,7 @@ async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str
         params["sport"] = sport
     if week:
         params["scoring_period"] = week
-    r = await client.get(f"{API}/FetchLeagueScoreboard", params=params, timeout=20)
+    r = await _get(client, "FetchLeagueScoreboard", params)
     if r.status_code != 200:
         raise FleaflickerError(f"Fleaflicker respondió {r.status_code}")
     data = r.json()

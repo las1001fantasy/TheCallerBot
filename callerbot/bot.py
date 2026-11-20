@@ -642,7 +642,8 @@ async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
     return (current.week - 1) if current.week and current.week > 1 else current.week
 
 
-NOTIFY_PAUSE = 3  # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram
+NOTIFY_PAUSE = 5         # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram
+NOTIFY_RETRY_WAIT = 90   # si Fleaflicker nos corta en una liga, esperamos esto y la reintentamos una vez al final
 
 
 async def _notify_scoreboard(ctx, league) -> list[str]:
@@ -698,22 +699,44 @@ async def cmd_notifymyleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         await reply(update, t("es", "notify_none", sport=sport))
         return
     await reply(update, t("es", "notify_start", n=len(leagues), sport=sport))
-    sent, failed = 0, []
+    # En segundo plano: con muchas ligas tarda minutos y el bot debe seguir atendiendo al resto de grupos.
+    ctx.application.create_task(_notify_run(update, ctx, leagues, actions))
+
+
+async def _notify_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE, leagues, actions) -> None:
+    async def send_league(league) -> None:
+        chat_id, thread_key = league["chat_id"], league["thread_key"]
+        texts = [text for action in actions for text in await action(ctx, league)]  # primero todo de Fleaflicker
+        for text in texts:
+            for chunk in split_message(text):
+                await ctx.bot.send_message(chat_id, chunk, message_thread_id=thread_key or None,
+                                           link_preview_options=NO_PREVIEW)
+                await asyncio.sleep(1)
+
+    sent, retry, failed = 0, [], []
     for i, league in enumerate(leagues):
         if i:
             await asyncio.sleep(NOTIFY_PAUSE)
-        chat_id, thread_key = league["chat_id"], league["thread_key"]
         try:
-            for action in actions:
-                for text in await action(ctx, league):
-                    for chunk in split_message(text):
-                        await ctx.bot.send_message(chat_id, chunk, message_thread_id=thread_key or None,
-                                                   link_preview_options=NO_PREVIEW)
-                        await asyncio.sleep(1)
+            await send_league(league)
             sent += 1
+        except FleaflickerError:
+            retry.append(league)  # Fleaflicker nos ha frenado: la dejamos para el final
         except Exception as e:
             log.exception("notifyMyLeagues: error en la liga %s", league["league_id"])
             failed.append(f"{league['league_id']}: {e}")
+    if retry:
+        await reply(update, t("es", "notify_waiting", n=len(retry), seconds=NOTIFY_RETRY_WAIT))
+        await asyncio.sleep(NOTIFY_RETRY_WAIT)
+        for i, league in enumerate(retry):
+            if i:
+                await asyncio.sleep(NOTIFY_PAUSE * 2)
+            try:
+                await send_league(league)
+                sent += 1
+            except Exception as e:
+                log.exception("notifyMyLeagues: error reintentando la liga %s", league["league_id"])
+                failed.append(f"{league['league_id']}: {e}")
     text = t("es", "notify_done", n=sent)
     if failed:
         text += "\n" + t("es", "notify_failed") + "\n" + "\n".join(failed)
