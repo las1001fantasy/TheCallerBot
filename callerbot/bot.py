@@ -318,8 +318,13 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     except (FleaflickerError, httpx.HTTPError) as e:
         await reply(update, t(lang_of(league), "ff_error", error=e))
         return
+    await reply(update, t(lang_of(league), "checking_rosters"))
+    await reply(update, await illegal_rosters_text(ctx, league, state))
+
+
+async def illegal_rosters_text(ctx: ContextTypes.DEFAULT_TYPE, league, state: DraftState | None = None) -> str:
+    state = state or await load_state(ctx, league)
     lang = lang_of(league)
-    await reply(update, t(lang, "checking_rosters"))
     week = None
     sport = (league["sport"] or "").upper()
     if sport == "NFL":  # los byes solo existen en la NFL
@@ -344,7 +349,7 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             return team, [], f"{type(e).__name__}: {e}"
 
     results = await asyncio.gather(*(one(t) for t in state.teams))
-    users = storage(ctx).users(*channel(update))
+    users = storage(ctx).users(league["chat_id"], league["thread_key"])
     lines, failed = [], []
     for team, issues, error in results:
         # El @nick de Telegram hace que al manager le llegue el aviso; si no está asociado, su usuario de Fleaflicker.
@@ -356,7 +361,7 @@ async def cmd_getillegalrosters(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     text = "\n".join([t(lang, "rosters_header"), *lines]) if lines else t(lang, "rosters_ok")
     if failed:
         text += "\n\n" + t(lang, "rosters_failed") + "\n" + "\n".join(failed)
-    await reply(update, text)
+    return text
 
 
 # ---------- Gestión de la liga ----------
@@ -640,17 +645,52 @@ async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
 NOTIFY_PAUSE = 3  # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram
 
 
-async def cmd_notifyallleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/notifyAllLeagues [NFL|NBA|NHL|MLB]: en cada liga donde quien lo escribe es el commish, publica los
-    resultados y después la clasificación. Sin deporte, solo las de NFL. Pensado para el chat privado con el bot."""
+async def _notify_scoreboard(ctx, league) -> list[str]:
+    return [await scoreboard_text(ctx, league, await finished_week(ctx, league))]
+
+
+async def _notify_standings(ctx, league) -> list[str]:
+    return [await standings_text(ctx, league)]
+
+
+async def _notify_rosters(ctx, league) -> list[str]:
+    return [await illegal_rosters_text(ctx, league)]
+
+
+async def _notify_otc(ctx, league) -> list[str]:
+    state = await load_state(ctx, league)
+    if state.on_the_clock is None:  # sin draft en marcha no molestamos a esa liga
+        return []
+    return [otc_line(state, storage(ctx).users(league["chat_id"], league["thread_key"]), lang_of(league))]
+
+
+# Órdenes que se pueden lanzar en todas tus ligas con /notifyMyLeagues <orden> [deporte]
+NOTIFY_ACTIONS = {
+    "getscoreboard": [_notify_scoreboard],
+    "getleaguestanding": [_notify_standings],
+    "getillegalrosters": [_notify_rosters],
+    "whosotc": [_notify_otc],
+}
+NOTIFY_DEFAULT = [_notify_scoreboard, _notify_standings]  # sin orden: resultados y después clasificación
+
+
+async def cmd_notifymyleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/notifyMyLeagues [orden] [NFL|NBA|NHL|MLB]: lanza la orden en cada liga donde quien la escribe es el commish.
+    Sin deporte, solo las de NFL; sin orden, resultados y clasificación. Pensado para el chat privado con el bot."""
     user = update.effective_user
     if not user or not user.username:
         await reply(update, t("es", "notify_no_username"))
         return
-    sport = ctx.args[0].upper() if ctx.args else "NFL"
-    if sport not in SPORTS:
-        await reply(update, t("es", "notify_usage"))
-        return
+    sport, actions = "NFL", NOTIFY_DEFAULT
+    for arg in ctx.args or []:
+        word = arg.lstrip("/").split("@")[0].lower()
+        if word.upper() in SPORTS:
+            sport = word.upper()
+        elif word in NOTIFY_ACTIONS:
+            actions = NOTIFY_ACTIONS[word]
+        else:
+            await reply(update, t("es", "notify_usage"))
+            return
     me = norm(f"@{user.username}")
     leagues = [lg for lg in storage(ctx).all_leagues()
                if lg["commish"] and norm(lg["commish"]) == me and (lg["sport"] or "").upper() == sport]
@@ -664,15 +704,15 @@ async def cmd_notifyallleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             await asyncio.sleep(NOTIFY_PAUSE)
         chat_id, thread_key = league["chat_id"], league["thread_key"]
         try:
-            week = await finished_week(ctx, league)
-            for text in (await scoreboard_text(ctx, league, week), await standings_text(ctx, league)):
-                for chunk in split_message(text):
-                    await ctx.bot.send_message(chat_id, chunk, message_thread_id=thread_key or None,
-                                               link_preview_options=NO_PREVIEW)
-                    await asyncio.sleep(1)
+            for action in actions:
+                for text in await action(ctx, league):
+                    for chunk in split_message(text):
+                        await ctx.bot.send_message(chat_id, chunk, message_thread_id=thread_key or None,
+                                                   link_preview_options=NO_PREVIEW)
+                        await asyncio.sleep(1)
             sent += 1
         except Exception as e:
-            log.exception("notifyAllLeagues: error en la liga %s", league["league_id"])
+            log.exception("notifyMyLeagues: error en la liga %s", league["league_id"])
             failed.append(f"{league['league_id']}: {e}")
     text = t("es", "notify_done", n=sent)
     if failed:
@@ -742,7 +782,7 @@ COMMANDS = {
     "setleague": cmd_setleague, "getchannelid": cmd_getchannelid, "getteams": cmd_getteams,
     "whosotc": cmd_whosotc, "getleague": cmd_getleague, "getleagueinfo": cmd_getleagueinfo,
     "getmissingusers": cmd_getmissingusers, "unsetleague": cmd_unsetleague, "setcommish": cmd_setcommish,
-    "notifyallleagues": cmd_notifyallleagues, "notifymyleagues": cmd_notifyallleagues,
+    "notifymyleagues": cmd_notifymyleagues, "notifyallleagues": cmd_notifymyleagues,
     "addtelegramusers": cmd_addtelegramusers, "startdraft": cmd_startdraft, "stopdraft": cmd_stopdraft,
     "getillegalrosters": cmd_getillegalrosters, "debugroster": cmd_debugroster,
     "getleaguestanding": cmd_getleaguestanding, "getscoreboard": cmd_getscoreboard,

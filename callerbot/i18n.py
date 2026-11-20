@@ -17,7 +17,7 @@ Comandos públicos:
 /getIllegalRosters - Revisa las plantillas: lesionados (OUT, IR, PUP, EX...) o de BYE de titular, titulares sin partido hoy (NBA, NHL, MLB), sanos en IR, no rookies en TAXI y huecos vacíos (las Q no se avisan)
 /getLeagueStanding - Clasificación de la liga
 /getScoreBoard (jornada) - Resultados de la jornada actual, o de la que indiques (ligas H2H)
-/notifyAllLeagues (NBA, NHL o MLB) - Desde el chat privado con el bot: publica resultados y clasificación en todas las ligas donde eres commish (sin deporte, las de NFL)
+/notifyMyLeagues (orden) (NBA, NHL o MLB) - Desde el chat privado con el bot: lanza getScoreBoard, getLeagueStanding, getIllegalRosters o whosOTC en todas las ligas donde eres commish (sin orden, resultados y clasificación; sin deporte, las de NFL)
 
 Gestión de la liga (commish o admins del grupo):
 /getLeague - Liga asignada a este canal
@@ -47,7 +47,7 @@ Ordres públiques:
 /getIllegalRosters - Revisa les plantilles: lesionats (OUT, IR, PUP, EX...) o de BYE de titular, titulars sense partit avui (NBA, NHL, MLB), sans a l'IR, no rookies al TAXI i forats buits (les Q no s'avisen)
 /getLeagueStanding - Classificació de la lliga
 /getScoreBoard (jornada) - Resultats de la jornada actual, o de la que indiquis (lligues H2H)
-/notifyAllLeagues (NBA, NHL o MLB) - Des del xat privat amb el bot: publica resultats i classificació a totes les lligues on ets commish (sense esport, les de NFL)
+/notifyMyLeagues (ordre) (NBA, NHL o MLB) - Des del xat privat amb el bot: llança getScoreBoard, getLeagueStanding, getIllegalRosters o whosOTC a totes les lligues on ets commish (sense ordre, resultats i classificació; sense esport, les de NFL)
 
 Gestió de la lliga (commish o admins del grup):
 /getLeague - Lliga assignada a aquest canal
@@ -123,9 +123,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_no_game": "tiene {n} titular(es) que no juegan hoy",
         "standings_header": "Clasificación de la liga {league_id}:",
         "notify_no_username": "Necesitas un nombre de usuario (@nick) en Telegram para usar este comando.",
-        "notify_usage": "Uso: /notifyAllLeagues [NFL|NBA|NHL|MLB] (sin deporte, NFL).",
+        "notify_usage": "Uso: /notifyMyLeagues orden deporte. Órdenes: getScoreBoard, getLeagueStanding, getIllegalRosters, whosOTC (sin orden, resultados y clasificación). Deporte: NBA, NHL o MLB (sin deporte, NFL). Ej.: /notifyMyLeagues getScoreBoard NHL",
         "notify_none": "No eres commish de ninguna liga de {sport} en las que estoy.",
-        "notify_start": "Enviando resultados y clasificación a {n} liga(s) de {sport}, una a una...",
+        "notify_start": "Enviando a {n} liga(s) de {sport}, una a una...",
         "notify_done": "Listo: enviado a {n} liga(s).",
         "notify_failed": "No he podido enviar a:",
         "scoreboard_header": "Resultados de la jornada {week}:",
@@ -195,9 +195,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "issue_no_game": "té {n} titular(s) que no juguen avui",
         "standings_header": "Classificació de la lliga {league_id}:",
         "notify_no_username": "Necessites un nom d'usuari (@nick) a Telegram per fer servir aquesta ordre.",
-        "notify_usage": "Ús: /notifyAllLeagues [NFL|NBA|NHL|MLB] (sense esport, NFL).",
+        "notify_usage": "Ús: /notifyMyLeagues ordre esport. Ordres: getScoreBoard, getLeagueStanding, getIllegalRosters, whosOTC (sense ordre, resultats i classificació). Esport: NBA, NHL o MLB (sense esport, NFL). Ex.: /notifyMyLeagues getScoreBoard NHL",
         "notify_none": "No ets commish de cap lliga de {sport} on sóc.",
-        "notify_start": "Enviant resultats i classificació a {n} lliga(es) de {sport}, una a una...",
+        "notify_start": "Enviant a {n} lliga(es) de {sport}, una a una...",
         "notify_done": "Fet: enviat a {n} lliga(es).",
         "notify_failed": "No he pogut enviar a:",
         "scoreboard_header": "Resultats de la jornada {week}:",
