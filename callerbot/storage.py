@@ -109,7 +109,10 @@ class Storage:
         self.db.commit()
 
     def users(self, chat_id: int, thread_key: int) -> dict[str, str]:
+        """Usuarios de Fleaflicker -> @nick. Lo asociado en este tema manda; si no, se usa lo que se haya asociado
+        en cualquier otra liga o grupo, para no tener que repetir /addTelegramUsers con managers ya conocidos."""
         rows = self.db.execute(
-            "SELECT ff_user, telegram FROM users WHERE chat_id = ? AND thread_key = ?", (chat_id, thread_key)
+            "SELECT ff_user, telegram, chat_id = ? AND thread_key = ? AS here FROM users ORDER BY here, rowid",
+            (chat_id, thread_key),
         ).fetchall()
-        return {r["ff_user"]: r["telegram"] for r in rows}
+        return {r["ff_user"]: r["telegram"] for r in rows}  # las filas de este tema van al final y pisan al resto
