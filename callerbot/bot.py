@@ -619,7 +619,7 @@ async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 if league["scoreboard_weekly"]:
                     current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
-                    last_week = (current.week - 1) if current.week and current.week > 1 else None
+                    last_week = previous_period(current)
                     parts.append(await scoreboard_text(ctx, league, last_week))
                 if league["standings_weekly"]:
                     parts.append(await standings_text(ctx, league))
@@ -634,12 +634,18 @@ async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await asyncio.gather(*(one(league) for league in pending))
 
 
+def previous_period(board) -> int | None:
+    """Periodo a pedir a Fleaflicker para la jornada anterior (en NBA/NHL/MLB los periodos son días)."""
+    first = board.first_period or board.week
+    return first - 1 if first and first > 1 else None
+
+
 async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
     """La jornada actual si ya ha terminado; si aún se juega, la anterior (la última con resultados cerrados)."""
     current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
     if current.games and all(g.final for g in current.games):
-        return current.week
-    return (current.week - 1) if current.week and current.week > 1 else current.week
+        return None  # la actual, sin pedir periodo
+    return previous_period(current)
 
 
 NOTIFY_PAUSE = 5         # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram

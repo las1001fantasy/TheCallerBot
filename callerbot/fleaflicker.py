@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 
 import httpx
 
 from .i18n import t
+
+log = logging.getLogger(__name__)
 
 API = "https://www.fleaflicker.com/api"
 SPORTS = ("NFL", "NBA", "NHL", "MLB")
@@ -419,6 +422,9 @@ class Game:
 class Scoreboard:
     week: int | None
     games: list[Game]
+    # Primer periodo de puntuación de la jornada. En la NFL coincide con la semana; en NBA, NHL y MLB Fleaflicker
+    # cuenta por días, así que la jornada anterior se pide con el día anterior a este (first_period - 1).
+    first_period: int | None = None
 
 
 async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str | None,
@@ -434,6 +440,10 @@ async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str
     data = r.json()
     period = data.get("schedulePeriod") or {}
     ordinal = period.get("ordinal") or period.get("value") or week
+    low = period.get("low")
+    first = (low.get("ordinal") if isinstance(low, dict) else low) or ordinal
+    log.info("Scoreboard liga %s (periodo pedido %s): claves=%s schedulePeriod=%s", league_id, week,
+             [k for k in data if k != "games"], period)
     games: list[Game] = []
     for g in data.get("games", []):
         away, home = g.get("away") or {}, g.get("home") or {}
@@ -447,4 +457,4 @@ async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str
         ))
     if not games:
         raise FleaflickerError("No hay enfrentamientos esa jornada (¿la liga no es H2H?)")
-    return Scoreboard(week=int(ordinal) if ordinal else None, games=games)
+    return Scoreboard(week=int(ordinal) if ordinal else None, games=games, first_period=int(first) if first else None)
