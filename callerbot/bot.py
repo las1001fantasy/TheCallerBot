@@ -643,8 +643,8 @@ def previous_period(board) -> int | None:
 async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
     """La jornada actual si ya ha terminado; si aún se juega, la anterior (la última con resultados cerrados)."""
     current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
-    if current.games and all(g.final for g in current.games):
-        return None  # la actual, sin pedir periodo
+    if current.last_day or (current.games and all(g.final for g in current.games)):
+        return None  # la actual (ya acabada o en su último día), sin pedir periodo
     return previous_period(current)
 
 

@@ -425,6 +425,8 @@ class Scoreboard:
     # Primer periodo de puntuación de la jornada. En la NFL coincide con la semana; en NBA, NHL y MLB Fleaflicker
     # cuenta por días, así que la jornada anterior se pide con el día anterior a este (first_period - 1).
     first_period: int | None = None
+    # Fleaflicker está en el último día de la jornada (en Europa ya es lunes, pero allí aún es domingo)
+    last_day: bool = False
 
 
 async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str | None,
@@ -457,4 +459,5 @@ async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str
         ))
     if not games:
         raise FleaflickerError("No hay enfrentamientos esa jornada (¿la liga no es H2H?)")
-    return Scoreboard(week=int(ordinal) if ordinal else None, games=games, first_period=int(first) if first else None)
+    return Scoreboard(week=int(ordinal) if ordinal else None, games=games, first_period=int(first) if first else None,
+                      last_day=bool(isinstance(period.get("high"), dict) and period["high"].get("isNow")))
