@@ -693,7 +693,24 @@ async def cmd_notifymyleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         await reply(update, t("es", "notify_no_username"))
         return
     sport, actions = "NFL", NOTIFY_DEFAULT
-    for arg in ctx.args or []:
+    args = ctx.args or []
+    if args and args[0].lower() in ("message", "mensaje", "missatge"):
+        # /notifyMyLeagues message <texto> [NBA|NHL|MLB|NFL]: el texto tal cual (con saltos de línea) a todas tus
+        # ligas; si acaba en un deporte, solo a las de ese deporte.
+        raw = update.effective_message.text.split(None, 1)[1]
+        text = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
+        sport = None
+        words = text.split()
+        if words and words[-1].upper() in SPORTS:
+            sport = words[-1].upper()
+            text = text[: text.rstrip().rfind(words[-1])].rstrip()
+        if not text:
+            await reply(update, t("es", "notify_usage"))
+            return
+        async def say(ctx, league, text=text) -> list[str]:
+            return [text]
+        actions, args = [say], []
+    for arg in args:
         word = arg.lstrip("/").split("@")[0].lower()
         if word.upper() in SPORTS:
             sport = word.upper()
@@ -704,11 +721,12 @@ async def cmd_notifymyleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             return
     me = norm(f"@{user.username}")
     leagues = [lg for lg in storage(ctx).all_leagues()
-               if lg["commish"] and norm(lg["commish"]) == me and (lg["sport"] or "").upper() == sport]
+               if lg["commish"] and norm(lg["commish"]) == me and (sport is None or (lg["sport"] or "").upper() == sport)]
+    label = sport or t("es", "all_sports")
     if not leagues:
-        await reply(update, t("es", "notify_none", sport=sport))
+        await reply(update, t("es", "notify_none", sport=label))
         return
-    await reply(update, t("es", "notify_start", n=len(leagues), sport=sport))
+    await reply(update, t("es", "notify_start", n=len(leagues), sport=label))
     # En segundo plano: con muchas ligas tarda minutos y el bot debe seguir atendiendo al resto de grupos.
     ctx.application.create_task(_notify_run(update, ctx, leagues, actions))
 
