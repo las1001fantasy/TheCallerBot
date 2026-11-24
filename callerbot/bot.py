@@ -618,9 +618,7 @@ async def weekly_reports(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parts = [t(lang, "weekly_title")]
             try:
                 if league["scoreboard_weekly"]:
-                    current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
-                    last_week = previous_period(current)
-                    parts.append(await scoreboard_text(ctx, league, last_week))
+                    parts.append(await scoreboard_text(ctx, league, await finished_week(ctx, league)))
                 if league["standings_weekly"]:
                     parts.append(await standings_text(ctx, league))
                 await ctx.bot.send_message(chat_id, "\n\n".join(parts), message_thread_id=thread_key or None,
@@ -640,12 +638,18 @@ def previous_period(board) -> int | None:
     return first - 1 if first and first > 1 else None
 
 
+JUST_STARTED = 36 * 3600  # una jornada de NBA/NHL/MLB con menos de 36 h aún se considera recién empezada
+
+
 async def finished_week(ctx: ContextTypes.DEFAULT_TYPE, league) -> int | None:
-    """La jornada actual si ya ha terminado; si aún se juega, la anterior (la última con resultados cerrados)."""
+    """La jornada que toca enseñar: la actual, salvo que acabe de empezar (sin puntos todavía, o en deportes
+    diarios con menos de 36 h), en cuyo caso la anterior. Así el lunes/martes salen los de la semana que acaba."""
     current = await fetch_scoreboard(http(ctx), league["league_id"], league["sport"])
     if current.last_day or (current.games and all(g.final for g in current.games)):
-        return None  # la actual (ya acabada o en su último día), sin pedir periodo
-    return previous_period(current)
+        return None  # la actual, sin pedir periodo
+    no_points = all(not g.away_score and not g.home_score for g in current.games)
+    just_started = bool(current.first_start and time.time() - current.first_start < JUST_STARTED)
+    return previous_period(current) if no_points or just_started else None
 
 
 NOTIFY_PAUSE = 5         # segundos entre liga y liga para no saturar a Fleaflicker ni a Telegram

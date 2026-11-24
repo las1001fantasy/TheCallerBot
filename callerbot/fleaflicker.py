@@ -427,6 +427,7 @@ class Scoreboard:
     first_period: int | None = None
     # Fleaflicker está en el último día de la jornada (en Europa ya es lunes, pero allí aún es domingo)
     last_day: bool = False
+    first_start: float | None = None  # inicio de la jornada (epoch en segundos)
 
 
 async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str | None,
@@ -460,4 +461,6 @@ async def fetch_scoreboard(client: httpx.AsyncClient, league_id: int, sport: str
     if not games:
         raise FleaflickerError("No hay enfrentamientos esa jornada (¿la liga no es H2H?)")
     return Scoreboard(week=int(ordinal) if ordinal else None, games=games, first_period=int(first) if first else None,
-                      last_day=bool(isinstance(period.get("high"), dict) and period["high"].get("isNow")))
+                      last_day=bool(isinstance(period.get("high"), dict) and period["high"].get("isNow")),
+                      first_start=int(low["startEpochMilli"]) / 1000
+                      if isinstance(low, dict) and low.get("startEpochMilli") else None)
